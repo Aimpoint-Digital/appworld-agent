@@ -20,3 +20,13 @@ appworld pip install -U "click==8.1.7" run prior to data download
 tmux being used
 
 repo forked and cloned - appworld
+
+checked, incomign request looking like:
+{
+  "model": "Qwen/Qwen3-8B",
+  "messages": [
+    {"role": "user", "content": "goodbye"}
+  ],
+  "temperature": 0.0,
+  "user": "TASK_123"
+}

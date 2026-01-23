@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from dotenv import load_dotenv, find_dotenv
 
@@ -23,22 +23,15 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    """
+    appworld may pass through some fields i dont need to edit here, so just pass through
+    """
+    model_config = ConfigDict(extra="allow")
+
+    # standard fields we do need to track
     model: str
     messages: List[ChatMessage]
-
-    temperature: Optional[float] = 0.0
-    max_tokens: Optional[int] = None
-    max_completion_tokens: Optional[int] = None
-    top_p: Optional[float] = None
-    stop: Optional[Union[str, List[str]]] = None
-
-    tools: Optional[List[Dict[str, Any]]] = None
-    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
-    parallel_tool_calls: Optional[bool] = None
-
     stream: Optional[bool] = False
-
-    # should be the task id:
     user: Optional[str] = None
 
 
@@ -49,32 +42,12 @@ def to_openai_messages(req: ChatCompletionRequest) -> List[Dict[str, Any]]:
 def extract_task_id(req: ChatCompletionRequest) -> Optional[str]:
     if req.user:
         return req.user
-    if req.appworld:
-        return req.appworld.task_id
     return None
 
 
 def build_vllm_payload(req: ChatCompletionRequest) -> Dict[str, Any]:
-    max_tokens = req.max_tokens if req.max_tokens is not None else req.max_completion_tokens
-
-    payload: Dict[str, Any] = {
-        "model": req.model,
-        "messages": to_openai_messages(req),
-        "temperature": req.temperature,
-        # Only include if not None (vLLM/OpenAI both accept max_tokens)
-        **({ "max_tokens": max_tokens } if max_tokens is not None else {}),
-        **({ "top_p": req.top_p } if req.top_p is not None else {}),
-        **({ "stop": req.stop } if req.stop is not None else {}),
-        **({ "tools": req.tools } if req.tools is not None else {}),
-        **({ "tool_choice": req.tool_choice } if req.tool_choice is not None else {}),
-        **({ "parallel_tool_calls": req.parallel_tool_calls } if req.parallel_tool_calls is not None else {}),
-        "stream": False,  # keep it simple at first
-    }
-    # IMPORTANT: do not forward req.appworld; unknown fields can break downstream
-    # You can forward req.user if you want vLLM logs to include it:
-    if req.user is not None:
-        payload["user"] = req.user
-    return payload
+    data = req.model_dump(exclude_none=True)
+    return data
 
 
 def post_process_assistant_message(
@@ -91,6 +64,7 @@ def post_process_assistant_message(
     # code_snippet = code_extractor(assistant_message)
     # content = agent_repl(code_snippet, task_id)  # or modify content
 
+    # replace in place
     assistant_message["content"] = content
     return assistant_message
 
@@ -111,10 +85,6 @@ async def chat_completions(req: ChatCompletionRequest):
 
     vllm_resp = r.json()
 
-    # Defensive shape checks
-    if "choices" not in vllm_resp or not vllm_resp["choices"]:
-        raise HTTPException(status_code=502, detail="vLLM response missing choices")
-
     # Patch assistant message (choice 0)
     msg = vllm_resp["choices"][0].get("message")
     if not isinstance(msg, dict):
@@ -122,13 +92,12 @@ async def chat_completions(req: ChatCompletionRequest):
 
     vllm_resp["choices"][0]["message"] = post_process_assistant_message(msg, task_id) # this can call repl env
 
-    # Optionally attach metadata for your own client (AppWorld won’t care)
-    # vllm_resp["_appworld_task_id"] = task_id
-
     return vllm_resp
 
 
 @app.get("/v1/models")
 async def models():
-    # minimal stub; you can proxy vLLM's /v1/models if desired
+    """
+    mainly a dummy route, probably dont need
+    """
     return {"object": "list", "data": []}
