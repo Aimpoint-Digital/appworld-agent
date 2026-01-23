@@ -1,17 +1,71 @@
 import os
 import uuid
-from typing import Any, Dict, List, Optional, Union
+import json
+import re
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
-
 from dotenv import load_dotenv, find_dotenv
+
+# You likely have these in your project
+from appworld import AppWorld
+# from your_module import code_extractor  # <- make sure this exists / import correctly
 
 load_dotenv(find_dotenv())
 
+# -------------------------
+# Logging setup
+# -------------------------
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_PATH = os.getenv("PROXY_LOG_PATH", "proxy_interventions.log")
+
+logger = logging.getLogger("appworld_proxy")
+logger.setLevel(LOG_LEVEL)
+
+# Avoid double-handlers if reloaded by uvicorn
+if not logger.handlers:
+    fmt = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    file_handler = logging.FileHandler(LOG_PATH)
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+    logger.addHandler(stream_handler)
+
+
+def log_event(event: str, **fields: Any) -> None:
+    """
+    Emit a single JSON log line to make later parsing easy (Datadog, ELK, etc.)
+    """
+    payload = {
+        "event": event,
+        "ts": datetime.utcnow().isoformat() + "Z",
+        **fields,
+    }
+    logger.info(json.dumps(payload, ensure_ascii=False))
+
+
+# -------------------------
+# ENV settings, configs
+# -------------------------
+
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001")
 VLLM_CHAT_URL = f"{VLLM_BASE_URL}/v1/chat/completions"
+
+ERROR_PATTERNS = [
+    r"^Execution failed",  # AppWorld standard
+    r"Traceback \(most recent call last\):",
+    r"\b(Exception|Error):",  # generic Python errors
+]
 
 app = FastAPI()
 
@@ -28,76 +82,241 @@ class ChatCompletionRequest(BaseModel):
     """
     model_config = ConfigDict(extra="allow")
 
-    # standard fields we do need to track
     model: str
     messages: List[ChatMessage]
     stream: Optional[bool] = False
     user: Optional[str] = None
 
 
-def to_openai_messages(req: ChatCompletionRequest) -> List[Dict[str, Any]]:
-    return [m.model_dump(exclude_none=True) for m in req.messages]
-
-
 def extract_task_id(req: ChatCompletionRequest) -> Optional[str]:
-    if req.user:
-        return req.user
-    return None
+    return req.user or None
 
 
 def build_vllm_payload(req: ChatCompletionRequest) -> Dict[str, Any]:
-    data = req.model_dump(exclude_none=True)
-    return data
+    """
+    this can be used to generate an intelligent summary if chat getting too long
+    """
+    return req.model_dump(exclude_none=True)
 
 
-def post_process_assistant_message(
+def _rand_experiment_name(task_id: str) -> str:
+    return f"proxy-{task_id}-{uuid.uuid4().hex[:8]}"
+
+
+def looks_like_error(world_out: Any) -> bool:
+    if not isinstance(world_out, str):
+        return False
+    return any(re.search(p, world_out, flags=re.MULTILINE) for p in ERROR_PATTERNS)
+
+
+async def get_fix_suggestion_from_vllm(
+    task_id: Optional[str],
+    code: str,
+    world_out: str,
+    model: str = "Qwen/Qwen3-8B",
+) -> str:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are debugging code executed inside AppWorld. "
+                "Return a short explanation and diagnosis the model can use to generate better code. "
+                "Do NOT use input(). Do NOT ask the user questions. "
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Task id: {task_id}\n\n"
+                "The following code was executed and failed.\n\n"
+                "Code:\n"
+                f"```python\n{code}\n```\n\n"
+                "Execution output:\n"
+                f"```text\n{world_out}\n```"
+            ),
+        },
+    ]
+
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 400,
+        "stream": False,
+        **({"user": task_id} if task_id else {}),
+    }
+
+    timeout = httpx.Timeout(120.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(
+            f"{VLLM_BASE_URL}/v1/chat/completions",
+            json=payload,
+            headers={"Authorization": "Bearer EMPTY"},
+        )
+
+    r.raise_for_status()
+    data = r.json()
+    return data["choices"][0]["message"].get("content", "")
+
+
+async def post_process_assistant_message(
     assistant_message: Dict[str, Any],
     task_id: Optional[str],
+    history: Sequence[Dict[str, Any]],
+    request_id: str,
 ) -> Dict[str, Any]:
     """
-    Your hook: take vLLM assistant message and rewrite it if desired.
-    Keep tool_calls if present. Keep role.
+    Rebuild AppWorld state by replaying executable code extracted from prior messages,
+    then execute code from the newest assistant message.
     """
+    if not task_id:
+        log_event(
+            "intervention.skipped_no_task_id",
+            request_id=request_id,
+        )
+        return assistant_message
+
     content = assistant_message.get("content") or ""
+    experiment_name = _rand_experiment_name(task_id)
 
-    # Example hooks (plug in your real ones):
-    # code_snippet = code_extractor(assistant_message)
-    # content = agent_repl(code_snippet, task_id)  # or modify content
+    log_event(
+        "intervention.start",
+        request_id=request_id,
+        task_id=task_id,
+        experiment_name=experiment_name,
+        assistant_content_preview=content[:300],
+    )
 
-    # replace in place
-    assistant_message["content"] = content
+    world_out: Optional[str] = None
+    new_code: Optional[str] = None
+
+    try:
+        with AppWorld(task_id=task_id, experiment_name=experiment_name) as world:
+            # Replay: all assistant messages from history (excluding latest; history includes user+assistant)
+            for m in history:
+                if m.get("role") != "assistant":
+                    continue
+                msg_content = m.get("content") or ""
+                code, _text = code_extractor(msg_content)  # must exist in your project
+                if code:
+                    world.execute(code)
+
+            # Execute newest assistant message
+            new_code, _new_text = code_extractor(content)
+            if new_code:
+                world_out = world.execute(new_code)
+
+    except Exception as e:
+        # If replay/execution itself crashed outside AppWorld's string errors
+        log_event(
+            "intervention.exception",
+            request_id=request_id,
+            task_id=task_id,
+            error=str(e),
+        )
+        # Let it fall through: we’ll just return original assistant message
+        return assistant_message
+
+    log_event(
+        "intervention.execution_result",
+        request_id=request_id,
+        task_id=task_id,
+        looks_like_error=looks_like_error(world_out),
+        raw_world_out=(world_out or "")[:4000],
+        executed_code_preview=(new_code or "")[:800],
+    )
+
+    curated: Optional[str] = None
+    if world_out is not None and looks_like_error(world_out) and new_code:
+        curated = await get_fix_suggestion_from_vllm(
+            task_id=task_id,
+            code=new_code,
+            world_out=world_out,
+            model="Qwen/Qwen3-8B",
+        )
+        log_event(
+            "intervention.curated",
+            request_id=request_id,
+            task_id=task_id,
+            curated_preview=(curated or "")[:800],
+        )
+
+        # If you want to replace assistant content with the curated suggestion:
+        assistant_message["content"] = curated
+    else:
+        # Leave original assistant content intact
+        assistant_message["content"] = content
+
+    log_event(
+        "intervention.final_response",
+        request_id=request_id,
+        task_id=task_id,
+        returned_content_preview=(assistant_message.get("content") or "")[:800],
+        was_curated=bool(curated),
+    )
+
     return assistant_message
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(req: ChatCompletionRequest, request: Request):
+    request_id = uuid.uuid4().hex[:12]
+
     if req.stream:
         raise HTTPException(status_code=400, detail="Streaming not supported by this proxy yet.")
 
     task_id = extract_task_id(req)
-    payload = build_vllm_payload(req) # in here we can intelligent summarize if we want
+    payload = build_vllm_payload(req)
+
+    # Log incoming request (minimal but useful)
+    log_event(
+        "request.incoming",
+        request_id=request_id,
+        task_id=task_id,
+        model=req.model,
+        n_messages=len(req.messages),
+        client_host=getattr(request.client, "host", None),
+        last_user_preview=(req.messages[-1].content[:300] if req.messages and req.messages[-1].content else None),
+    )
 
     timeout = httpx.Timeout(120.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(VLLM_CHAT_URL, json=payload, headers={"Authorization": "Bearer EMPTY"})
+
     if r.status_code >= 400:
+        log_event(
+            "request.vllm_error",
+            request_id=request_id,
+            task_id=task_id,
+            status_code=r.status_code,
+            body_preview=r.text[:2000],
+        )
         raise HTTPException(status_code=502, detail=f"vLLM error {r.status_code}: {r.text}")
 
     vllm_resp = r.json()
 
-    # Patch assistant message (choice 0)
     msg = vllm_resp["choices"][0].get("message")
     if not isinstance(msg, dict):
+        log_event(
+            "response.bad_vllm_format",
+            request_id=request_id,
+            task_id=task_id,
+            body_preview=str(vllm_resp)[:2000],
+        )
         raise HTTPException(status_code=502, detail="vLLM response missing message")
 
-    vllm_resp["choices"][0]["message"] = post_process_assistant_message(msg, task_id) # this can call repl env
+    history = [m.model_dump(exclude_none=True) for m in req.messages]
+
+    vllm_resp["choices"][0]["message"] = await post_process_assistant_message(
+        assistant_message=msg,
+        task_id=task_id,
+        history=history,
+        request_id=request_id,
+    )
 
     return vllm_resp
 
 
 @app.get("/v1/models")
 async def models():
-    """
-    mainly a dummy route, probably dont need
-    """
     return {"object": "list", "data": []}

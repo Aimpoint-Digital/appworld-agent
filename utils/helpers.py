@@ -1,5 +1,6 @@
+import re
 
-def code_extractor(text: str) -> tuple[str, str]:
+def code_extractor(text: str, ignore_multiple_calls: bool = True) -> tuple[str, str]:
     """
     Exact code from appworld repo, taken from SimplifiedReActCodeAgent at
     appworld/experiments/code/simplified/react_code_agent.py
@@ -7,6 +8,8 @@ def code_extractor(text: str) -> tuple[str, str]:
     original_text = text
     output_code = ""
     match_end = 0
+    full_code_regex = r"```python\n(.*?)```"
+    partial_code_regex = r".*```python\n(.*)"
     # Handle multiple calls
     for re_match in re.finditer(full_code_regex, original_text, flags=re.DOTALL):
         code = re_match.group(1).strip()
