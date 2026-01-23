@@ -190,6 +190,7 @@ async def post_process_assistant_message(
     world_out: Optional[str] = None
     new_code: Optional[str] = None
 
+    # before testing the new code, we need to recreate DB state
     try:
         with AppWorld(task_id=task_id, experiment_name=experiment_name) as world:
             # Replay: all assistant messages from history (excluding latest; history includes user+assistant)
@@ -215,7 +216,7 @@ async def post_process_assistant_message(
             error=str(e),
         )
         # Let it fall through: we’ll just return original assistant message
-        return assistant_message
+        raise Exception(f"[post_process_assistant_message] Error during World execution: {e}")
 
     log_event(
         "intervention.execution_result",

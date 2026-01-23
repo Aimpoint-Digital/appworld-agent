@@ -30,3 +30,35 @@ checked, incomign request looking like:
   "temperature": 0.0,
   "user": "TASK_123"
 }
+
+
+
+instructions for running:
+first made MODEL_INFOs file in model repo # appworld/experiments/code/models/vllm_local.py
+
+set export OPENAI_API_KEY=EMPTY
+
+
+then made jsonnet file
+
+python experiments/configs/_generator/run.py \
+  --model_names vllm-local-8000-qwen3-8b \
+  --agent_names simplified_react_code_agent \
+  --dataset_names test_normal
+
+
+  then ran exp with:
+
+appworld run auto \
+  --agent-name simplified_react_code_agent \
+  --model-name vllm-local-8000-qwen3-8b \
+  --dataset-name test_normal
+
+results stored like:
+ubuntu@ip-172-31-39-1:~/appworld-source/appworld_source/appworld/experiments/outputs/simplified_react_code_agent/vllm_local/vllm-local-8000-qwen3-8b/test_normal/tasks$ ls
+3d9a636_1  3d9a636_2  3d9a636_3  fd1f8fa_1
+
+
+then do evaluation:
+appworld evaluate simplified_react_code_agent/vllm_local/vllm-local-8000-qwen3-8b/test_normal test_normal
+
