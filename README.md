@@ -63,6 +63,8 @@ You **must** run with the Aimpoint fork because we patched the agent plumbing:
 * Fix reasoning extraction / parsing in the ReAct code agent
 * Pass **task id** through the OpenAI-compatible request `user` field so the proxy can recover it
 
+NOTE: do not install appworld directly as stated in their readme instructions. you must run pip install -e . to install the fork. then run appworld install --repo, and then download the data. 
+
 ### Clone + checkout
 
 ```bash
