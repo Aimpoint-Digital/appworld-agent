@@ -11,9 +11,9 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 from dotenv import load_dotenv, find_dotenv
 
-# You likely have these in your project
 from appworld import AppWorld
-# from your_module import code_extractor  # <- make sure this exists / import correctly
+from summary_module import maybe_summarize_payload
+from helpers import code_extractor
 
 load_dotenv(find_dotenv())
 
@@ -268,6 +268,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
     task_id = extract_task_id(req)
     payload = build_vllm_payload(req)
+    payload = await maybe_summarize_payload(payload=payload, task_id=task_id)
 
     # Log incoming request (minimal but useful)
     log_event(

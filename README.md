@@ -277,28 +277,6 @@ After evaluation, we want:
 
 ---
 
-## Task List / TODO
-
-* [ ] Run AppWorld benchmark on target SLM (Qwen/Qwen3-8B)
-* [ ] Use LLM to recursively summarize main failure modes (dev/test_normal; avoid target leakage)
-* [ ] Validate FastAPI + vLLM payload structure matches AppWorld expectations (Pydantic/signatures)
-* [ ] Build helper functions:
-
-  * `intelligent_truncation`
-  * `agent_repl`
-  * `code_extractor`
-* [ ] Ensure task id is propagated from AppWorld → model call (`user` field)
-* [ ] Finish + test main app
-* [ ] Run a single AppWorld task end-to-end
-* [ ] Run benchmarks:
-
-  * truncation + repl
-  * repl only
-  * truncation only
-* [ ] Compare successful runs vs baseline failures and compute category deltas
-
----
-
 ## Common pitfalls
 
 ### Running `appworld evaluate` from the wrong directory
@@ -315,14 +293,205 @@ Make sure `VLLM_BASE_URL` matches where `vllm serve` is listening and the proxy 
 
 ---
 
-## Quick end-to-end checklist
+## Run the Experiment
 
-1. Start vLLM in tmux
-2. Activate AppWorld env
-3. `appworld download data` (once)
-4. Generate configs
-5. `appworld run auto ...`
-6. `appworld evaluate ...`
-7. Run failure analyzer script to produce `failure_analysis_<dataset>.json`
+## 0) One-time setup (per machine / repo)
+
+1. **Activate env + be at AppWorld repo root**
+
+```bash
+cd ~/appworld-source/appworld_source/appworld
+source ../../../../appenv/bin/activate  # adjust if different
+```
+
+2. **Confirm data exists**
+
+```bash
+ls -la ./data/tasks | head
+```
+
+If missing:
+
+```bash
+appworld download data
+```
+
+3. **Start vLLM (Qwen3-8B)**
+
+```bash
+tmux new -s vllm
+vllm serve Qwen/Qwen3-8B \
+  --reasoning-parser qwen3 \
+  --max-model-len 6384 \
+  --gpu-memory-utilization 0.9 \
+  --max-num-seqs 16 \
+  --port 8001
+```
+
+Detach: `Ctrl-b d`
+
+4. **(If needed) generate configs (you already did, but here’s the canonical)**
+
+```bash
+python experiments/configs/_generator/run.py \
+  --model_names vllm-local-8000-qwen3-8b \
+  --agent_names simplified_react_code_agent \
+  --dataset_names test_normal
+```
 
 ---
+
+## Run A — Baseline (direct vLLM, no proxy)
+
+1. **Point AppWorld model to vLLM directly**
+
+* Ensure your `MODEL_INFO` (or model config for `vllm-local-8000-qwen3-8b`) uses, jsut make sure the JSONNET file is using the same port the FastaPI/vLLM is running on:
+
+  * `base_url: http://127.0.0.1:8001`
+  * and `Authorization: Bearer EMPTY` 
+
+2. **Run the benchmark**
+
+```bash
+appworld run auto \
+  --agent-name simplified_react_code_agent \
+  --model-name vllm-local-8000-qwen3-8b \
+  --dataset-name test_normal
+```
+
+3. **Evaluate (from AppWorld repo root)**
+
+```bash
+appworld evaluate vllm-local-8000-qwen3-8b test_normal
+```
+
+4. **Classify failures (your script)**
+Make sure openAI token set in environment
+
+```bash
+python scripts/classify_failures.py \
+  --experiment "vllm-local-8000-qwen3-8b" \
+  --dataset "test_normal" \
+  --out "experiments/outputs/vllm-local-8000-qwen3-8b/analysis/failure_modes.json"
+```
+
+---
+
+## Run B — Proxy ON (post-processing), summarization OFF
+
+### What changes?
+
+* AppWorld model base_url now points to **FastAPI proxy** at `http://127.0.0.1:8000`
+* Proxy forwards to vLLM at `http://127.0.0.1:8001` -> make sure vLLM is running on that port using instructions above
+* Proxy env vars:
+
+  * post-processing enabled (your default behavior)
+  * summarization disabled
+
+1. **Start the proxy (port 8000)**
+
+```bash
+tmux new -s proxy_no_summary
+export VLLM_BASE_URL="http://127.0.0.1:8001"
+export ENABLE_CONTEXT_SUMMARY=0
+export OPENAI_API_KEY=EMPTY   # keep if AppWorld expects it set; summarization is off anyway
+export PROXY_LOG_PATH="proxy_no_summary.log"
+uvicorn path.to.your_proxy_module:app --host 0.0.0.0 --port 8000
+```
+
+Detach: `Ctrl-b d`
+
+2. **Point AppWorld model to the proxy**
+
+* `base_url: http://127.0.0.1:8000`
+* model name can stay `vllm-local-8000-qwen3-8b` (AppWorld just passes it through)
+
+3. **Run benchmark (use a distinct experiment name)**
+   Best practice: create a separate model name like `vllm-proxy-8000-qwen3-8b` so outputs don’t collide. If you don’t want to add a model name, you can still isolate by running into different output roots, but simplest is: add a model entry.
+
+Then run:
+
+```bash
+appworld run auto \
+  --agent-name simplified_react_code_agent \
+  --model-name vllm-proxy-8000-qwen3-8b \
+  --dataset-name test_normal
+```
+
+4. **Evaluate**
+
+```bash
+appworld evaluate vllm-proxy-8000-qwen3-8b test_normal
+```
+
+5. **Classify failures**
+
+```bash
+python scripts/classify_failures.py \
+  --experiment "vllm-proxy-8000-qwen3-8b" \
+  --dataset "test_normal" \
+  --out "experiments/outputs/vllm-proxy-8000-qwen3-8b/analysis/failure_modes.json"
+```
+
+---
+
+## Run C — Proxy ON (post-processing), summarization ON
+
+### What changes?
+
+Just proxy env vars (and you’ll need a real OpenAI key if summarizing via OpenAI).
+
+1. **Stop prior proxy tmux session and start a new one**
+
+```bash
+tmux kill-session -t proxy_no_summary
+tmux new -s proxy_with_summary
+export VLLM_BASE_URL="http://127.0.0.1:8001"
+export ENABLE_CONTEXT_SUMMARY=1
+export SUMMARY_CHAR_THRESHOLD=24000
+export SUMMARY_TOKEN_THRESHOLD=6000
+export SUMMARY_KEEP_LAST_K=6
+export SUMMARY_MODEL="gpt-4o"         # or gpt-4o-mini
+export OPENAI_API_KEY="YOUR_REAL_KEY"
+export PROXY_LOG_PATH="proxy_with_summary.log"
+uvicorn path.to.your_proxy_module:app --host 0.0.0.0 --port 8000
+```
+
+Detach: `Ctrl-b d`
+
+2. **Run benchmark (distinct experiment name/model entry)**
+
+```bash
+appworld run auto \
+  --agent-name simplified_react_code_agent \
+  --model-name vllm-proxy-sum-8000-qwen3-8b \
+  --dataset-name test_normal
+```
+
+3. **Evaluate**
+
+```bash
+appworld evaluate vllm-proxy-sum-8000-qwen3-8b test_normal
+```
+
+4. **Classify failures**
+
+```bash
+python scripts/classify_failures.py \
+  --experiment "vllm-proxy-sum-8000-qwen3-8b" \
+  --dataset "test_normal" \
+  --out "experiments/outputs/vllm-proxy-sum-8000-qwen3-8b/analysis/failure_modes.json"
+```
+
+---
+
+## Two “gotchas” that will save you pain
+
+1. **Evaluation must run from AppWorld repo root** (where `./data` exists).
+   Otherwise you’ll get the “Did not find any ./data” error you hit earlier.
+
+2. **Make experiment names distinct**
+   AppWorld’s evaluator expects outputs in:
+   `./experiments/outputs/{experiment_name}/tasks/{task_id}/dbs`
+
+So don’t reuse the same `{experiment_name}` across runs unless you really intend to overwrite.
