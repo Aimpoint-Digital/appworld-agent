@@ -12,9 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 
-from appworld import AppWorld
-from helpers import code_extractor
-
 load_dotenv(find_dotenv())
 
 # -------------------------
