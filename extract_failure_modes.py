@@ -293,14 +293,20 @@ Return a classification following the provided JSON schema.
 Focus on the primary failure reason and give concrete evidence lines/snippets.
 """
 
-    resp = client.chat.responses.create(
-        model="gpt-4o",
+    resp = client.responses.create(
+        # Structured Outputs via json_schema are supported for GPT-4o snapshots and later
+        # (e.g. "gpt-4o-2024-08-06").  :contentReference[oaicite:1]{index=1}
+        model="gpt-4o-2024-08-06",
         input=prompt,
-        response_format={
-            "type": "json_schema",
-            "json_schema": FAILURE_SCHEMA,
+        text={
+            "format": {
+                "type": "json_schema",
+                "strict": True,
+                "schema": FAILURE_SCHEMA,  # <-- your JSON Schema object
+            }
         },
     )
+    
     # resp.output_text should be valid JSON per schema
     return json.loads(resp.output_text)
 
