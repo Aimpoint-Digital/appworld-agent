@@ -294,16 +294,14 @@ Focus on the primary failure reason and give concrete evidence lines/snippets.
 """
 
     resp = client.responses.create(
-        # Structured Outputs via json_schema are supported for GPT-4o snapshots and later
-        # (e.g. "gpt-4o-2024-08-06").  :contentReference[oaicite:1]{index=1}
         model="gpt-4o-2024-08-06",
         input=prompt,
         text={
             "format": {
                 "type": "json_schema",
-                "name": "failure_classification", 
+                "name": FAILURE_SCHEMA["name"],    
                 "strict": True,
-                "schema": FAILURE_SCHEMA,  # <-- your JSON Schema object
+                "schema": FAILURE_SCHEMA["schema"], 
             }
         },
     )
