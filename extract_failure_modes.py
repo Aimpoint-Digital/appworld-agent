@@ -301,12 +301,13 @@ Focus on the primary failure reason and give concrete evidence lines/snippets.
         text={
             "format": {
                 "type": "json_schema",
+                "name": "failure_classification", 
                 "strict": True,
                 "schema": FAILURE_SCHEMA,  # <-- your JSON Schema object
             }
         },
     )
-    
+
     # resp.output_text should be valid JSON per schema
     return json.loads(resp.output_text)
 
