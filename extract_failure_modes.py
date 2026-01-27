@@ -294,7 +294,7 @@ Focus on the primary failure reason and give concrete evidence lines/snippets.
 """
 
     resp = client.responses.create(
-        model="gpt-4o-2024-08-06",
+        model="gpt-4o-mini",
         input=prompt,
         text={
             "format": {
