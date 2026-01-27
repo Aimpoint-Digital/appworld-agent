@@ -371,7 +371,7 @@ appworld evaluate vllm-local-8000-qwen3-8b test_normal
 Make sure openAI token set in environment
 
 ```bash
-python scripts/classify_failures.py \
+python scripts/extract_failure_modes.py \
   --experiment "vllm-local-8000-qwen3-8b" \
   --dataset "test_normal" \
   --out "experiments/outputs/vllm-local-8000-qwen3-8b/analysis/failure_modes.json"

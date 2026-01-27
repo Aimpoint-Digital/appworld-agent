@@ -97,10 +97,75 @@ def infer_experiment_name(appworld_root: Path, experiment_dir: Path) -> str:
         )
     return str(rel).replace("\\", "/")
 
-def run_appworld_evaluate(appworld_root: Path, experiment_name: str, dataset_name: str) -> None:
+def run_appworld_evaluate_full(appworld_root: Path, experiment_name: str, dataset_name: str) -> None:
     cmd = ["appworld", "evaluate", experiment_name, dataset_name]
     print(f"\nRunning: {' '.join(cmd)} (cwd={appworld_root})\n")
     subprocess.run(cmd, cwd=str(appworld_root), check=True)
+
+def run_appworld_evaluate_present_tasks(
+    appworld_root: Path,
+    experiment_dir: Path,
+    experiment_name: str,
+) -> List[str]:
+    """
+    Evaluate ONLY tasks that exist in experiment_dir/tasks/.
+    Returns the list of task_ids evaluated.
+    """
+    tasks_dir = experiment_dir / "tasks"
+    if not tasks_dir.exists():
+        raise FileNotFoundError(f"Expected tasks dir: {tasks_dir}")
+
+    task_ids = sorted([p.name for p in tasks_dir.iterdir() if p.is_dir()])
+    if not task_ids:
+        print(f"No tasks found under: {tasks_dir}")
+        return []
+
+    for i, task_id in enumerate(task_ids, start=1):
+        cmd = ["appworld", "evaluate", experiment_name, "--task-id", task_id]
+        print(f"\n[{i}/{len(task_ids)}] Running: {' '.join(cmd)} (cwd={appworld_root})\n")
+        subprocess.run(cmd, cwd=str(appworld_root), check=True)
+
+    return task_ids
+
+def load_evaluations_full(experiment_dir: Path, dataset_name: str) -> Dict[str, Any]:
+    eval_json = experiment_dir / "evaluations" / f"{dataset_name}.json"
+    if not eval_json.exists():
+        raise FileNotFoundError(f"Expected evaluation json at: {eval_json}")
+    return read_json(eval_json)
+
+def load_evaluations_present(experiment_dir: Path, task_ids: List[str]) -> Dict[str, Any]:
+    """
+    Merge evaluations/on_only_<task_id>.json into a dataset-like dict:
+      {"aggregate": {...best-effort...}, "individual": {task_id: {...}}}
+    Aggregate is optional / best-effort since per-task aggregate is not meaningful.
+    """
+    evaluations_dir = experiment_dir / "evaluations"
+    individual: Dict[str, Any] = {}
+    missing: List[str] = []
+
+    for task_id in task_ids:
+        p = evaluations_dir / f"on_only_{task_id}.json"
+        if not p.exists():
+            missing.append(task_id)
+            continue
+        data = read_json(p)
+        entry = safe_get(data, ["individual", task_id], default=None)
+        if isinstance(entry, dict):
+            individual[task_id] = entry
+        else:
+            missing.append(task_id)
+
+    # “aggregate” is not meaningful across per-task runs; keep it minimal.
+    merged = {
+        "aggregate": {
+            "note": "Merged from per-task evaluations (on_only_<task_id>.json). Aggregate metrics are not computed.",
+            "num_tasks_evaluated": len(individual),
+            "num_tasks_missing_eval": len(missing),
+        },
+        "individual": individual,
+        "missing_eval_task_ids": missing,
+    }
+    return merged
 
 def extract_transcript_from_lm_calls(lm_calls_rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
@@ -242,19 +307,39 @@ Focus on the primary failure reason and give concrete evidence lines/snippets.
 # Main pipeline
 # -------------------------
 
-def analyze_experiment(experiment_dir: Path, dataset_name: str, run_eval: bool = True) -> Path:
+def analyze_experiment(
+    experiment_dir: Path,
+    dataset_name: str,
+    run_eval: bool = True,
+    eval_mode: str = "present",  # "present" | "full"
+) -> Path:
     appworld_root = find_appworld_root_from_experiment_dir(experiment_dir)
     experiment_name = infer_experiment_name(appworld_root, experiment_dir)
 
-    eval_json = experiment_dir / "evaluations" / f"{dataset_name}.json"
-
+    # Decide evaluation strategy
+    task_ids_present: List[str] = []
     if run_eval:
-        run_appworld_evaluate(appworld_root, experiment_name, dataset_name)
+        if eval_mode == "full":
+            run_appworld_evaluate_full(appworld_root, experiment_name, dataset_name)
+        elif eval_mode == "present":
+            task_ids_present = run_appworld_evaluate_present_tasks(
+                appworld_root=appworld_root,
+                experiment_dir=experiment_dir,
+                experiment_name=experiment_name,
+            )
+        else:
+            raise ValueError("eval_mode must be 'full' or 'present'")
 
-    if not eval_json.exists():
-        raise FileNotFoundError(f"Expected evaluation json at: {eval_json}")
+    # Load evaluation results
+    if eval_mode == "full":
+        evaluation = load_evaluations_full(experiment_dir, dataset_name)
+    else:
+        # If we didn't run eval now, still infer task_ids from disk
+        if not task_ids_present:
+            tasks_dir = experiment_dir / "tasks"
+            task_ids_present = sorted([p.name for p in tasks_dir.iterdir() if p.is_dir()]) if tasks_dir.exists() else []
+        evaluation = load_evaluations_present(experiment_dir, task_ids_present)
 
-    evaluation = read_json(eval_json)
     individual = evaluation.get("individual", {})
 
     failed_task_ids: List[str] = []
@@ -262,15 +347,22 @@ def analyze_experiment(experiment_dir: Path, dataset_name: str, run_eval: bool =
         if entry.get("success") is False:
             failed_task_ids.append(tid)
 
-    print(f"\nFound {len(failed_task_ids)} failed tasks in {dataset_name}.\n")
+    print(f"\nEval mode: {eval_mode}")
+    print(f"Found {len(individual)} evaluated tasks.")
+    print(f"Found {len(failed_task_ids)} failed tasks.\n")
 
     client = OpenAI()
 
     results: Dict[str, Any] = {
         "experiment_dir": str(experiment_dir),
+        "experiment_name": experiment_name,
         "dataset_name": dataset_name,
+        "eval_mode": eval_mode,
+        "num_evaluated_tasks": len(individual),
         "num_failed_tasks": len(failed_task_ids),
         "failures": [],
+        "evaluation_meta": evaluation.get("aggregate", {}),
+        "missing_eval_task_ids": evaluation.get("missing_eval_task_ids", []),
     }
 
     for i, task_id in enumerate(failed_task_ids, start=1):
@@ -289,7 +381,6 @@ def analyze_experiment(experiment_dir: Path, dataset_name: str, run_eval: bool =
         env_io_text = read_text(env_io_path, max_chars=60_000)
 
         if not transcript_text.strip() and not env_io_text.strip():
-            # still record it, but note missing logs
             classification = {
                 "task_id": task_id,
                 "success": False,
@@ -297,7 +388,7 @@ def analyze_experiment(experiment_dir: Path, dataset_name: str, run_eval: bool =
                 "secondary_categories": ["missing_logs"],
                 "root_cause": "Could not find usable lm_calls.jsonl/environment_io.md for this task.",
                 "evidence": [f"Missing or empty: {lm_calls_path}", f"Missing or empty: {env_io_path}"],
-                "suggested_fix": "Ensure the agent run is configured to write lm_calls.jsonl and environment_io.md into tasks/<task_id>/logs/.",
+                "suggested_fix": "Ensure the agent run writes lm_calls.jsonl and environment_io.md into tasks/<task_id>/logs/.",
                 "confidence": 0.3,
             }
         else:
@@ -316,11 +407,10 @@ def analyze_experiment(experiment_dir: Path, dataset_name: str, run_eval: bool =
             "logs_dir": str(logs_dir),
         })
 
-    out_path = experiment_dir / f"failure_analysis_{dataset_name}.json"
+    out_path = experiment_dir / f"failure_analysis_{dataset_name}_{eval_mode}.json"
     out_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"\nWrote: {out_path}\n")
     return out_path
-
 
 def main():
     print("\n=== AppWorld Failure Analyzer ===\n")
@@ -329,10 +419,16 @@ def main():
     if not dataset:
         raise ValueError("dataset_name is required.")
 
+    mode = input("Evaluation mode: 'present' (only tasks on disk) or 'full' (entire dataset)? [present/full]:\n> ").strip().lower()
+    if mode not in ("present", "full", ""):
+        raise ValueError("mode must be 'present' or 'full'")
+    if mode == "":
+        mode = "present"
+
     run_eval_str = input("Run `appworld evaluate` now? [Y/n]:\n> ").strip().lower()
     run_eval = (run_eval_str != "n")
 
-    analyze_experiment(exp_dir, dataset_name=dataset, run_eval=run_eval)
+    analyze_experiment(exp_dir, dataset_name=dataset, run_eval=run_eval, eval_mode=mode)
 
 
 if __name__ == "__main__":

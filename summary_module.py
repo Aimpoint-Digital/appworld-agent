@@ -147,7 +147,7 @@ async def maybe_summarize_payload(
         return payload
 
     messages = payload.get("messages") or []
-    if not isinstance(messages, list) or len(messages) < 6:
+    if not isinstance(messages, list) or len(messages) < 6: # could probably have this as an env setting
         return payload
 
     total_chars, approx_toks = payload_size(messages)
@@ -179,7 +179,7 @@ async def maybe_summarize_payload(
 
     summary_text = await summarize_messages_with_openai(
         task_id=task_id,
-        task_instruction=task_instruction,
+        task_instruction=system_msg + task_instruction,
         middle_messages=middle,
     )
 
@@ -193,10 +193,10 @@ async def maybe_summarize_payload(
     # Keep the task instruction user message verbatim
     new_messages.append(messages[first_user_idx])
 
-    # Insert a synthetic “summary” message (role can be system or assistant; I prefer system)
+    # Insert a synthetic “summary” message
     new_messages.append(
         {
-            "role": "system",
+            "role": "assistant",
             "content": (
                 "CONTEXT SUMMARY (auto-generated). This replaces earlier conversation details.\n\n"
                 f"{summary_text}"
