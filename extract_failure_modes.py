@@ -294,7 +294,7 @@ Focus on the primary failure reason and give concrete evidence lines/snippets.
 """
 
     resp = client.responses.create(
-        model="gpt-4o-mini",
+        model="gpt-4o-mini", # supporting models listed at https://platform.openai.com/settings/organization/limits
         input=prompt,
         text={
             "format": {

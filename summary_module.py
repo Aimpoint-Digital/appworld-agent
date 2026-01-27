@@ -92,11 +92,21 @@ async def summarize_messages_with_openai(
 
     middle_blob = "\n\n".join(render_msg(m) for m in middle_messages)
 
+    # targets main failure modes
     sys = (
         "You are compressing an agent conversation for continued execution in a tool-using benchmark.\n"
         "Produce a concise but action-oriented summary that helps the agent continue correctly.\n"
-        "Do NOT invent tool outputs or facts.\n"
-        "Emphasize: attempted actions, outcomes, discovered constraints, and recurring failure modes.\n"
+        "Do NOT invent tool outputs, API calls, credentials, or facts.\n\n"
+
+        "When summarizing, actively look for and explicitly note ANY of the following IF THEY OCCURRED:\n"
+        "- Authentication or credential problems (missing tokens, login required, 401/403, expired creds)\n"
+        "- Tool/API misuse (wrong API name, missing required call, wrong parameters, schema mismatch)\n"
+        "- No-op executions (tool call made but no state change; empty changed_records; task claims success without effects)\n"
+        "- Pagination or incomplete iteration issues (only first page fetched, missing cursor/offset handling)\n"
+        "- Repeated or looping actions that failed similarly\n\n"
+
+        "If none of the above occurred, say so explicitly.\n"
+        "Prefer concrete evidence over interpretation (e.g., mention tool names, error messages, or observed outcomes).\n"
     )
 
     user = (

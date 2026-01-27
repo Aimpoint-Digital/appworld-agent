@@ -117,13 +117,31 @@ async def get_fix_suggestion_from_vllm(
 ) -> str:
     messages = [
         {
-            "role": "system",
-            "content": (
-                "You are debugging code executed inside AppWorld. "
-                "Return a short explanation and diagnosis the model can use to generate better code. "
-                "Do NOT use input(). Do NOT ask the user questions. "
-            ),
-        },
+          "role": "system",
+          "content": (
+              "You are debugging Python code executed inside AppWorld.\n"
+              "Your job is to produce a SHORT, ACTIONABLE intervention message that the agent can use immediately.\n"
+              "Do NOT ask questions. Do NOT use input(). Do NOT invent tool outputs or facts.\n"
+              "Prefer concrete edits to the code and specific API/tool call corrections.\n\n"
+              "Classify the failure using ONE primary category from this list:\n"
+              "- missing_api_call_or_wrong_api_name\n"
+              "- wrong_api_parameters_or_schema_mismatch\n"
+              "- pagination_or_incomplete_iteration\n"
+              "- auth_or_credentials_issue\n"
+              "- reasoning_or_planning_error\n"
+              "- repetition_or_loop\n"
+              "- tooling_runtime_error\n"
+              "- formatting_or_code_block_error\n"
+              "- other\n\n"
+              "Output format (exact):\n"
+              "PRIMARY_CATEGORY: <one from list>\n"
+              "EVIDENCE: <1-3 short quotes from the execution output>\n"
+              "DIAGNOSIS: <1-2 sentences>\n"
+              "FIX_STEPS:\n"
+              "- <2-6 bullet steps, concrete>\n"
+              "PATCH: <optional; include a corrected code snippet if it's small, else omit>\n"
+          ),
+        }
         {
             "role": "user",
             "content": (
