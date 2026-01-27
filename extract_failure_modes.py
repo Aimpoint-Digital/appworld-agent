@@ -293,7 +293,7 @@ Return a classification following the provided JSON schema.
 Focus on the primary failure reason and give concrete evidence lines/snippets.
 """
 
-    resp = client.responses.create(
+    resp = client.chat.responses.create(
         model="gpt-4o",
         input=prompt,
         response_format={
