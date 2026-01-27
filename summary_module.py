@@ -2,7 +2,13 @@ import os
 import math
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
+from dotenv import load_dotenv, find_dotenv
 
+from appworld import AppWorld
+from summary_module import maybe_summarize_payload
+from helpers import code_extractor
+
+load_dotenv(find_dotenv())
 # -------------------------
 # Summarization settings
 # -------------------------
