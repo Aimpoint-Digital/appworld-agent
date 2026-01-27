@@ -13,7 +13,7 @@ from dotenv import load_dotenv, find_dotenv
 
 from appworld import AppWorld
 from summary_module import maybe_summarize_payload
-from helpers import code_extractor
+from helpers import code_extractor, extract_api_calls
 
 load_dotenv(find_dotenv())
 
@@ -113,6 +113,7 @@ async def get_fix_suggestion_from_vllm(
     task_id: Optional[str],
     code: str,
     world_out: str,
+    api_docs_text: str = "",
     model: str = "Qwen/Qwen3-8B",
 ) -> str:
     messages = [
@@ -150,9 +151,16 @@ async def get_fix_suggestion_from_vllm(
                 "Code:\n"
                 f"```python\n{code}\n```\n\n"
                 "Execution output:\n"
-                f"```text\n{world_out}\n```"
+                f"```text\n{world_out}\n```\n\n"
+                + (
+                    "Relevant API documentation (authoritative):\n"
+                    f"```json\n{api_docs_text}\n```\n\n"
+                    if api_docs_text else ""
+                )
+                + "IMPORTANT: Any fixes must match the API docs exactly "
+                  "(argument names, types, and required fields).\n"
             ),
-        },
+        }
     ]
 
     payload: Dict[str, Any] = {
@@ -247,10 +255,26 @@ async def post_process_assistant_message(
 
     curated: Optional[str] = None
     if world_out is not None and looks_like_error(world_out) and new_code:
+
+        # get documentation for the api being called
+        api_docs_text = ""
+        if new_code:
+            calls = extract_api_calls(new_code)
+            if calls:
+                docs_chunks = []
+                for app_name, api_name in calls[:5]:  # cap to avoid huge payloads
+                    try:
+                        doc = world.apis.api_docs.show_api_doc(app_name=app_name, api_name=api_name)
+                        docs_chunks.append(f"apis.{app_name}.{api_name} spec:\n{json.dumps(doc, indent=2)[:4000]}")
+                    except Exception as e:
+                        docs_chunks.append(f"apis.{app_name}.{api_name} spec: <failed to load: {e}>")
+                api_docs_text = "\n\n".join(docs_chunks)
+
         curated = await get_fix_suggestion_from_vllm(
             task_id=task_id,
             code=new_code,
             world_out=world_out,
+            api_docs_text=api_docs_text,
             model="Qwen/Qwen3-8B",
         )
         log_event(
