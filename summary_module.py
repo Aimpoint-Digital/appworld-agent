@@ -15,9 +15,13 @@ ENABLE_CONTEXT_SUMMARY = os.getenv("ENABLE_CONTEXT_SUMMARY", "0") == "1"
 SUMMARY_CHAR_THRESHOLD = int(os.getenv("SUMMARY_CHAR_THRESHOLD", "24000"))  # raw chars across all message content
 SUMMARY_TOKEN_THRESHOLD = int(os.getenv("SUMMARY_TOKEN_THRESHOLD", "6000"))  # approximate tokens
 KEEP_LAST_K = int(os.getenv("SUMMARY_KEEP_LAST_K", "6"))  # keep last K messages verbatim
-SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-4o")  # or gpt-4o-mini, etc.
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "Qwen/Qwen3-8B")  
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+SUMMARY_VLLM_BASE_URL = os.getenv("SUMMARY_VLLM_BASE_URL", os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001"))
+SUMMARY_VLLM_CHAT_URL = f"{SUMMARY_VLLM_BASE_URL}/v1/chat/completions"
+SUMMARY_VLLM_API_KEY = os.getenv("SUMMARY_VLLM_API_KEY", "")  # optional; usually EMPTY in AppWorld proxy
+
 
 def approx_tokens_from_text(s: str) -> int:
     """
@@ -62,51 +66,37 @@ def build_vllm_payload(req) -> Dict[str, Any]:
     """
     return req.model_dump(exclude_none=True)
 
-async def summarize_messages_with_openai(
+async def summarize_messages_with_vllm(
     *,
     task_id: Optional[str],
     task_instruction: str,
     middle_messages: List[Dict[str, Any]],
     model: str = SUMMARY_MODEL,
 ) -> str:
-    """
-    Summarize the middle of the conversation for the agent, with emphasis on:
-      - what has been attempted
-      - what worked/failed
-      - recurring failure modes
-      - important intermediate state / constraints / credentials discovered
-    """
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set, but summarization was requested.")
-
     # Format middle messages compactly
     def render_msg(m: Dict[str, Any]) -> str:
         role = m.get("role", "unknown")
         content = m.get("content", "")
         if not isinstance(content, str):
             content = str(content)
-        # clip per-message to avoid huge requests; the point is compression anyway
         if len(content) > 2500:
             content = content[:2500] + "\n...[truncated]..."
         return f"{role.upper()}:\n{content}"
 
     middle_blob = "\n\n".join(render_msg(m) for m in middle_messages)
 
-    # targets main failure modes
     sys = (
         "You are compressing an agent conversation for continued execution in a tool-using benchmark.\n"
         "Produce a concise but action-oriented summary that helps the agent continue correctly.\n"
         "Do NOT invent tool outputs, API calls, credentials, or facts.\n\n"
-
         "When summarizing, actively look for and explicitly note ANY of the following IF THEY OCCURRED:\n"
         "- Authentication or credential problems (missing tokens, login required, 401/403, expired creds)\n"
         "- Tool/API misuse (wrong API name, missing required call, wrong parameters, schema mismatch)\n"
         "- No-op executions (tool call made but no state change; empty changed_records; task claims success without effects)\n"
         "- Pagination or incomplete iteration issues (only first page fetched, missing cursor/offset handling)\n"
         "- Repeated or looping actions that failed similarly\n\n"
-
         "If none of the above occurred, say so explicitly.\n"
-        "Prefer concrete evidence over interpretation (e.g., mention tool names, error messages, or observed outcomes).\n"
+        "Prefer concrete evidence over interpretation (tool names, error messages, observed outcomes).\n"
     )
 
     user = (
@@ -128,19 +118,105 @@ async def summarize_messages_with_openai(
             {"role": "user", "content": user},
         ],
         "temperature": 0.0,
+        "max_tokens": 600,   # summaries should be short
+        "stream": False,
+        **({"user": task_id} if task_id else {}),
     }
 
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
+        # vLLM typically ignores auth; keep compatible with your proxy style
+        "Authorization": f"Bearer {SUMMARY_VLLM_API_KEY or 'EMPTY'}",
     }
 
     timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{OPENAI_BASE_URL}/chat/completions", json=payload, headers=headers)
+        r = await client.post(SUMMARY_VLLM_CHAT_URL, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
-        return data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"].get("content", "")
+
+
+# NOTE: could work but arguably not "pure" since using different model
+# async def summarize_messages_with_openai(
+#     *,
+#     task_id: Optional[str],
+#     task_instruction: str,
+#     middle_messages: List[Dict[str, Any]],
+#     model: str = SUMMARY_MODEL,
+# ) -> str:
+#     """
+#     Summarize the middle of the conversation for the agent, with emphasis on:
+#       - what has been attempted
+#       - what worked/failed
+#       - recurring failure modes
+#       - important intermediate state / constraints / credentials discovered
+#     """
+#     if not OPENAI_API_KEY:
+#         raise RuntimeError("OPENAI_API_KEY is not set, but summarization was requested.")
+
+#     # Format middle messages compactly
+#     def render_msg(m: Dict[str, Any]) -> str:
+#         role = m.get("role", "unknown")
+#         content = m.get("content", "")
+#         if not isinstance(content, str):
+#             content = str(content)
+#         # clip per-message to avoid huge requests; the point is compression anyway
+#         if len(content) > 2500:
+#             content = content[:2500] + "\n...[truncated]..."
+#         return f"{role.upper()}:\n{content}"
+
+#     middle_blob = "\n\n".join(render_msg(m) for m in middle_messages)
+
+#     # targets main failure modes
+#     sys = (
+#         "You are compressing an agent conversation for continued execution in a tool-using benchmark.\n"
+#         "Produce a concise but action-oriented summary that helps the agent continue correctly.\n"
+#         "Do NOT invent tool outputs, API calls, credentials, or facts.\n\n"
+
+#         "When summarizing, actively look for and explicitly note ANY of the following IF THEY OCCURRED:\n"
+#         "- Authentication or credential problems (missing tokens, login required, 401/403, expired creds)\n"
+#         "- Tool/API misuse (wrong API name, missing required call, wrong parameters, schema mismatch)\n"
+#         "- No-op executions (tool call made but no state change; empty changed_records; task claims success without effects)\n"
+#         "- Pagination or incomplete iteration issues (only first page fetched, missing cursor/offset handling)\n"
+#         "- Repeated or looping actions that failed similarly\n\n"
+
+#         "If none of the above occurred, say so explicitly.\n"
+#         "Prefer concrete evidence over interpretation (e.g., mention tool names, error messages, or observed outcomes).\n"
+#     )
+
+#     user = (
+#         f"Task ID: {task_id or 'unknown'}\n\n"
+#         f"Original task instruction (keep exact intent):\n{task_instruction}\n\n"
+#         "Conversation segment to summarize (messages 2..N-1):\n"
+#         f"{middle_blob}\n\n"
+#         "Return ONLY the summary, in this structured format:\n"
+#         "1) Progress so far (3-6 bullets)\n"
+#         "2) Key facts / state discovered (bullets)\n"
+#         "3) Failure modes / repeated mistakes (bullets)\n"
+#         "4) Next best actions (bullets)\n"
+#     )
+
+#     payload = {
+#         "model": model,
+#         "messages": [
+#             {"role": "system", "content": sys},
+#             {"role": "user", "content": user},
+#         ],
+#         "temperature": 0.0,
+#     }
+
+#     headers = {
+#         "Authorization": f"Bearer {OPENAI_API_KEY}",
+#         "Content-Type": "application/json",
+#     }
+
+#     timeout = httpx.Timeout(60.0, connect=10.0)
+#     async with httpx.AsyncClient(timeout=timeout) as client:
+#         r = await client.post(f"{OPENAI_BASE_URL}/chat/completions", json=payload, headers=headers)
+#         r.raise_for_status()
+#         data = r.json()
+#         return data["choices"][0]["message"]["content"]
 
 async def maybe_summarize_payload(
     *,
@@ -191,9 +267,18 @@ async def maybe_summarize_payload(
     if not isinstance(task_instruction, str):
         task_instruction = str(task_instruction)
 
-    summary_text = await summarize_messages_with_openai(
+    # summary_text = await summarize_messages_with_openai(
+    #     task_id=task_id,
+    #     task_instruction=system_msg + task_instruction,
+    #     middle_messages=middle,
+    # )
+    system_text = ""
+    if system_msg and isinstance(system_msg.get("content"), str):
+        system_text = system_msg["content"]
+
+    summary_text = await summarize_messages_with_vllm(
         task_id=task_id,
-        task_instruction=system_msg + task_instruction,
+        task_instruction=(system_text + "\n\n" + task_instruction).strip(),
         middle_messages=middle,
     )
 
