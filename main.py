@@ -142,7 +142,7 @@ async def get_fix_suggestion_from_vllm(
               "- <2-6 bullet steps, concrete>\n"
               "PATCH: <optional; include a corrected code snippet if it's small, else omit>\n"
           ),
-        }
+        },
         {
             "role": "user",
             "content": (
