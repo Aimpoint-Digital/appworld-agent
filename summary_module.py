@@ -3,8 +3,9 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from dotenv import load_dotenv, find_dotenv
-
+import re
 from appworld import AppWorld
+from fastapi import HTTPException
 
 load_dotenv(find_dotenv())
 # -------------------------
@@ -57,7 +58,6 @@ def clamp_max_tokens_for_vllm(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload.pop("max_completion_tokens", None)  # optional: avoid ambiguity
     return payload
 
-
 def approx_tokens_from_text(s: str) -> int:
     """
     Cheap token approximation. Typically ~4 chars/token in English-ish text,
@@ -95,11 +95,33 @@ def find_system_and_first_user(messages: List[Dict[str, Any]]) -> Tuple[Optional
 
     return system_msg, first_user_idx
 
+_VLLM_CTX_RE = re.compile(
+    r"maximum context length is (\d+) tokens and your request has (\d+) input tokens.*?max_tokens.*?:\s*(\d+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 def build_vllm_payload(req) -> Dict[str, Any]:
     """
     Keep this simple. Summarization should happen in an async step before the POST.
     """
     return req.model_dump(exclude_none=True)
+
+def _parse_vllm_ctx_error(text: str) -> Optional[Tuple[int, int, int]]:
+    if not text:
+        return None
+    m = _VLLM_CTX_RE.search(text)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+def _render_msg(m: Dict[str, Any], clip: int) -> str:
+    role = m.get("role", "unknown")
+    content = m.get("content", "")
+    if not isinstance(content, str):
+        content = str(content)
+    if clip is not None and len(content) > clip:
+        content = content[:clip] + "\n...[truncated]..."
+    return f"{role.upper()}:\n{content}"
 
 async def summarize_messages_with_vllm(
     *,
@@ -108,18 +130,6 @@ async def summarize_messages_with_vllm(
     middle_messages: List[Dict[str, Any]],
     model: str = SUMMARY_MODEL,
 ) -> str:
-    # Format middle messages compactly
-    def render_msg(m: Dict[str, Any]) -> str:
-        role = m.get("role", "unknown")
-        content = m.get("content", "")
-        if not isinstance(content, str):
-            content = str(content)
-        if len(content) > 2500:
-            content = content[:2500] + "\n...[truncated]..."
-        return f"{role.upper()}:\n{content}"
-
-    middle_blob = "\n\n".join(render_msg(m) for m in middle_messages)
-
     sys = (
         "You are compressing an agent conversation for continued execution in a tool-using benchmark.\n"
         "Produce a concise but action-oriented summary that helps the agent continue correctly.\n"
@@ -134,42 +144,77 @@ async def summarize_messages_with_vllm(
         "Prefer concrete evidence over interpretation (tool names, error messages, observed outcomes).\n"
     )
 
-    user = (
-        f"Task ID: {task_id or 'unknown'}\n\n"
-        f"Original task instruction (keep exact intent):\n{task_instruction}\n\n"
-        "Conversation segment to summarize (messages 2..N-1):\n"
-        f"{middle_blob}\n\n"
-        "Return ONLY the summary, in this structured format:\n"
-        "1) Progress so far (3-6 bullets)\n"
-        "2) Key facts / state discovered (bullets)\n"
-        "3) Failure modes / repeated mistakes (bullets)\n"
-        "4) Next best actions (bullets)\n"
-    )
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": sys},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 600,   # summaries should be short
-        "stream": False,
-        **({"user": task_id} if task_id else {}),
-    }
-
     headers = {
         "Content-Type": "application/json",
-        # vLLM typically ignores auth; keep compatible with your proxy style
         "Authorization": f"Bearer {SUMMARY_VLLM_API_KEY or 'EMPTY'}",
     }
 
+    # progressively shrink prompt if needed
+    clip_sizes = [2500, 1200, 600, 300, 150]
+    msg_caps   = [60, 30, 15, 8, 4, 2]
+
+    # completion budget to try (also shrinks if vLLM complains)
+    max_tokens_try = [600, 300, 150, 80, 40]
+
     timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(SUMMARY_VLLM_CHAT_URL, json=payload, headers=headers)
-        r.raise_for_status()
-        data = r.json()
-        return data["choices"][0]["message"].get("content", "")
+        for clip in clip_sizes:
+            for cap in msg_caps:
+                mids = middle_messages[-cap:] if len(middle_messages) > cap else middle_messages
+                middle_blob = "\n\n".join(_render_msg(m, clip) for m in mids)
+
+                user = (
+                    f"Task ID: {task_id or 'unknown'}\n\n"
+                    f"Original task instruction (keep exact intent):\n{task_instruction}\n\n"
+                    "Conversation segment to summarize:\n"
+                    f"{middle_blob}\n\n"
+                    "Return ONLY the summary, in this structured format:\n"
+                    "1) Progress so far (3-6 bullets)\n"
+                    "2) Key facts / state discovered (bullets)\n"
+                    "3) Failure modes / repeated mistakes (bullets)\n"
+                    "4) Next best actions (bullets)\n"
+                )
+
+                for mt in max_tokens_try:
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": sys},
+                            {"role": "user", "content": user},
+                        ],
+                        "temperature": 0.0,
+                        "max_tokens": mt,
+                        "stream": False,
+                        **({"user": task_id} if task_id else {}),
+                    }
+
+                    r = await client.post(SUMMARY_VLLM_CHAT_URL, json=payload, headers=headers)
+
+                    if r.status_code == 200:
+                        data = r.json()
+                        return data["choices"][0]["message"].get("content", "")
+
+                    # Only handle context-length 400s; otherwise bail out of inner loops
+                    if r.status_code != 400:
+                        break
+
+                    ctx = _parse_vllm_ctx_error(r.text)
+                    if not ctx:
+                        break  # some other 400
+
+                    # If prompt itself is too large (or nearly), don't keep lowering max_tokens; shrink prompt instead
+                    max_ctx, input_toks, _req = ctx
+                    if (max_ctx - input_toks) <= 256:
+                        break  # go shrink (clip/cap) more
+
+        # If everything fails, return a small safe summary instead of crashing the proxy
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Context overflow during summarization: "
+                "prompt cannot be reduced enough to fit the model context window."
+            ),
+        )
 
 
 # NOTE: could work but arguably not "pure" since using different model

@@ -345,7 +345,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
         # Only treat 5xx as Bad Gateway
         raise HTTPException(
-            status_code=502,
+            status_code=400,
             detail=f"vLLM internal error {r.status_code}: {r.text}",
         )
 
