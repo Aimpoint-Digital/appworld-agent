@@ -13,7 +13,7 @@ from dotenv import load_dotenv, find_dotenv
 
 from appworld import AppWorld
 from summary_module import maybe_summarize_payload
-from helpers import code_extractor, extract_api_calls
+from utils.helpers import code_extractor, extract_api_calls
 
 load_dotenv(find_dotenv())
 
