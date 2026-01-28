@@ -335,7 +335,19 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             status_code=r.status_code,
             body_preview=r.text[:2000],
         )
-        raise HTTPException(status_code=502, detail=f"vLLM error {r.status_code}: {r.text}")
+
+        # IMPORTANT: propagate 4xx as 4xx
+        if 400 <= r.status_code < 500:
+            raise HTTPException(
+                status_code=400,
+                detail=f"vLLM rejected request: {r.text}",
+            )
+
+        # Only treat 5xx as Bad Gateway
+        raise HTTPException(
+            status_code=502,
+            detail=f"vLLM internal error {r.status_code}: {r.text}",
+        )
 
     vllm_resp = r.json()
 

@@ -11,7 +11,7 @@ load_dotenv(find_dotenv())
 # Summarization settings
 # -------------------------
 
-ENABLE_CONTEXT_SUMMARY = os.getenv("ENABLE_CONTEXT_SUMMARY", "0") == "1"
+ENABLE_CONTEXT_SUMMARY = os.getenv("ENABLE_CONTEXT_SUMMARY", "1") == "1"
 SUMMARY_CHAR_THRESHOLD = int(os.getenv("SUMMARY_CHAR_THRESHOLD", "24000"))  # raw chars across all message content
 SUMMARY_TOKEN_THRESHOLD = int(os.getenv("SUMMARY_TOKEN_THRESHOLD", "6000"))  # approximate tokens
 KEEP_LAST_K = int(os.getenv("SUMMARY_KEEP_LAST_K", "6"))  # keep last K messages verbatim
@@ -21,6 +21,41 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 SUMMARY_VLLM_BASE_URL = os.getenv("SUMMARY_VLLM_BASE_URL", os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001"))
 SUMMARY_VLLM_CHAT_URL = f"{SUMMARY_VLLM_BASE_URL}/v1/chat/completions"
 SUMMARY_VLLM_API_KEY = os.getenv("SUMMARY_VLLM_API_KEY", "")  # optional; usually EMPTY in AppWorld proxy
+VLLM_CONTEXT_LEN = int(os.getenv("VLLM_CONTEXT_LEN", "12000"))
+MIN_COMPLETION_TOKENS = int(os.getenv("MIN_COMPLETION_TOKENS", "256"))
+DEFAULT_COMPLETION_TOKENS = int(os.getenv("DEFAULT_COMPLETION_TOKENS", "1024"))
+
+
+def approx_prompt_tokens_from_messages(messages: List[Dict[str, Any]]) -> int:
+    # reuse your existing approximation
+    total_chars, approx_toks = payload_size(messages)
+    return approx_toks
+
+def clamp_max_tokens_for_vllm(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensures payload['max_tokens'] fits into context window given prompt size.
+    Works for vLLM OpenAI-compatible /chat/completions.
+    """
+    messages = payload.get("messages") or []
+    prompt_toks = approx_prompt_tokens_from_messages(messages)
+    available = max(0, VLLM_CONTEXT_LEN - prompt_toks)
+
+    # determine requested completion length
+    requested = payload.get("max_tokens")
+    if requested is None:
+        requested = payload.get("max_completion_tokens")
+    if requested is None:
+        requested = DEFAULT_COMPLETION_TOKENS
+
+    # clamp
+    safe = max(1, min(int(requested), available))
+
+    # if there is basically no room, still set something tiny to avoid vLLM 400
+    # (callers can decide to force summarize or reduce tail when safe < MIN)
+    payload = dict(payload)
+    payload["max_tokens"] = safe
+    payload.pop("max_completion_tokens", None)  # optional: avoid ambiguity
+    return payload
 
 
 def approx_tokens_from_text(s: str) -> int:
@@ -234,15 +269,15 @@ async def maybe_summarize_payload(
       - messages between first user instruction and the last K messages
     """
     if not ENABLE_CONTEXT_SUMMARY and not force:
-        return payload
+        return clamp_max_tokens_for_vllm(payload)
 
     messages = payload.get("messages") or []
     if not isinstance(messages, list) or len(messages) < 6: # could probably have this as an env setting
-        return payload
+        return clamp_max_tokens_for_vllm(payload)
 
     total_chars, approx_toks = payload_size(messages)
     if not force and total_chars < SUMMARY_CHAR_THRESHOLD and approx_toks < SUMMARY_TOKEN_THRESHOLD:
-        return payload
+        return clamp_max_tokens_for_vllm(payload)
 
     system_msg, first_user_idx = find_system_and_first_user(messages)
     if first_user_idx is None:
@@ -303,10 +338,9 @@ async def maybe_summarize_payload(
         }
     )
 
-    # Keep the tail verbatim
-    new_messages.extend(tail)
-
-    # Replace payload messages
     new_payload = dict(payload)
     new_payload["messages"] = new_messages
+
+    # Now clamp based on the NEW messages
+    new_payload = clamp_max_tokens_for_vllm(new_payload)
     return new_payload
