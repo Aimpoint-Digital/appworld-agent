@@ -237,7 +237,7 @@ async def get_fix_suggestion_from_vllm(
     data = r.json()
     return data["choices"][0]["message"].get("content", "")
 
-
+#NOTE: clamping and token limits are preventing full code edits from editor model
 async def post_process_assistant_message(
     assistant_message: Dict[str, Any],
     task_id: Optional[str],
@@ -268,6 +268,7 @@ async def post_process_assistant_message(
 
     world_out: Optional[str] = None
     new_code: Optional[str] = None
+    curated: Optional[str] = None
 
     # before testing the new code, we need to recreate DB state
     try:
@@ -285,6 +286,43 @@ async def post_process_assistant_message(
             new_code, _new_text = code_extractor(content)
             if new_code:
                 world_out = world.execute(new_code)
+
+            if world_out is not None and looks_like_error(world_out) and new_code:
+
+                # get documentation for the api being called
+                api_docs_text = ""
+                if new_code:
+                    calls = extract_api_calls(new_code)
+                    if calls:
+                        docs_chunks = []
+                        for app_name, api_name in calls[:5]:  # cap to avoid huge payloads
+                            try:
+                                doc = world.apis.api_docs.show_api_doc(app_name=app_name, api_name=api_name)
+                                docs_chunks.append(f"apis.{app_name}.{api_name} spec:\n{json.dumps(doc, indent=2)[:4000]}")
+                            except Exception as e:
+                                docs_chunks.append(f"apis.{app_name}.{api_name} spec: <failed to load: {e}>")
+                        api_docs_text = "\n\n".join(docs_chunks)
+
+                curated = await get_fix_suggestion_from_vllm(
+                    task_id=task_id,
+                    code=new_code,
+                    world_out=world_out,
+                    api_docs_text=api_docs_text,
+                    model="Qwen/Qwen3-8B",
+                )
+                log_event(
+                    "intervention.curated",
+                    request_id=request_id,
+                    task_id=task_id,
+                    curated_preview=(curated or "")[:800],
+                )
+
+                # If you want to replace assistant content with the curated suggestion:
+                assistant_message["content"] = curated
+            else:
+                # Leave original assistant content intact
+                assistant_message["content"] = content
+
 
     except Exception as e:
         # If replay/execution itself crashed outside AppWorld's string errors
@@ -305,43 +343,6 @@ async def post_process_assistant_message(
         raw_world_out=(world_out or "")[:4000],
         executed_code_preview=(new_code or "")[:800],
     )
-
-    curated: Optional[str] = None
-    if world_out is not None and looks_like_error(world_out) and new_code:
-
-        # get documentation for the api being called
-        api_docs_text = ""
-        if new_code:
-            calls = extract_api_calls(new_code)
-            if calls:
-                docs_chunks = []
-                for app_name, api_name in calls[:5]:  # cap to avoid huge payloads
-                    try:
-                        doc = world.apis.api_docs.show_api_doc(app_name=app_name, api_name=api_name)
-                        docs_chunks.append(f"apis.{app_name}.{api_name} spec:\n{json.dumps(doc, indent=2)[:4000]}")
-                    except Exception as e:
-                        docs_chunks.append(f"apis.{app_name}.{api_name} spec: <failed to load: {e}>")
-                api_docs_text = "\n\n".join(docs_chunks)
-
-        curated = await get_fix_suggestion_from_vllm(
-            task_id=task_id,
-            code=new_code,
-            world_out=world_out,
-            api_docs_text=api_docs_text,
-            model="Qwen/Qwen3-8B",
-        )
-        log_event(
-            "intervention.curated",
-            request_id=request_id,
-            task_id=task_id,
-            curated_preview=(curated or "")[:800],
-        )
-
-        # If you want to replace assistant content with the curated suggestion:
-        assistant_message["content"] = curated
-    else:
-        # Leave original assistant content intact
-        assistant_message["content"] = content
 
     log_event(
         "intervention.final_response",
