@@ -12,7 +12,7 @@ load_dotenv(find_dotenv())
 # Summarization settings
 # -------------------------
 
-ENABLE_CONTEXT_SUMMARY = os.getenv("ENABLE_CONTEXT_SUMMARY", "1") == "1"
+ENABLE_CONTEXT_SUMMARY = os.getenv("ENABLE_CONTEXT_SUMMARY", "0") == "1"
 SUMMARY_CHAR_THRESHOLD = int(os.getenv("SUMMARY_CHAR_THRESHOLD", "24000"))  # raw chars across all message content
 SUMMARY_TOKEN_THRESHOLD = int(os.getenv("SUMMARY_TOKEN_THRESHOLD", "6000"))  # approximate tokens
 KEEP_LAST_K = int(os.getenv("SUMMARY_KEEP_LAST_K", "6"))  # keep last K messages verbatim
@@ -25,7 +25,7 @@ SUMMARY_VLLM_API_KEY = os.getenv("SUMMARY_VLLM_API_KEY", "")  # optional; usuall
 VLLM_CONTEXT_LEN = int(os.getenv("VLLM_CONTEXT_LEN", "12000"))
 MIN_COMPLETION_TOKENS = int(os.getenv("MIN_COMPLETION_TOKENS", "256"))
 DEFAULT_COMPLETION_TOKENS = int(os.getenv("DEFAULT_COMPLETION_TOKENS", "1024"))
-KEEP_FIRST_N = int(os.getenv("SUMMARY_KEEP_FIRST_N", "4"))
+KEEP_FIRST_N = int(os.getenv("SUMMARY_KEEP_FIRST_N", "26")) # chosen based on react prompt template
 
 
 
