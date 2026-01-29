@@ -139,8 +139,18 @@ async def get_fix_suggestion_from_vllm(
               "EVIDENCE: <1-3 short quotes from the execution output>\n"
               "DIAGNOSIS: <1-2 sentences>\n"
               "FIX_STEPS:\n"
-              "- <2-6 bullet steps, concrete>\n"
-              "PATCH: <optional; include a corrected code snippet if it's small, else omit>\n"
+              "- <2-6 concrete bullet steps>\n"
+              "PATCH:\n"
+              "- OPTIONAL\n"
+              "- If no patch is needed, write exactly: PATCH: (omitted)\n"
+              "- If a patch IS provided, PATCH must contain ONLY a single fenced code block\n"
+              "- The fenced block MUST use this exact format:\n"
+              "```python\n"
+              "<corrected code>\n"
+              "```\n"
+              "- Do NOT include any explanation before or after the fenced block\n"
+              "\n"
+              "Before responding, verify that any PATCH provided follows the fencing rules exactly."
           ),
         },
         {
