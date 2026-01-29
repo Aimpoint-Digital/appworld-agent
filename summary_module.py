@@ -25,6 +25,8 @@ SUMMARY_VLLM_API_KEY = os.getenv("SUMMARY_VLLM_API_KEY", "")  # optional; usuall
 VLLM_CONTEXT_LEN = int(os.getenv("VLLM_CONTEXT_LEN", "12000"))
 MIN_COMPLETION_TOKENS = int(os.getenv("MIN_COMPLETION_TOKENS", "256"))
 DEFAULT_COMPLETION_TOKENS = int(os.getenv("DEFAULT_COMPLETION_TOKENS", "1024"))
+KEEP_FIRST_N = int(os.getenv("SUMMARY_KEEP_FIRST_N", "4"))
+
 
 
 def approx_prompt_tokens_from_messages(messages: List[Dict[str, Any]]) -> int:
@@ -125,8 +127,6 @@ def _render_msg(m: Dict[str, Any], clip: int) -> str:
 
 async def summarize_messages_with_vllm(
     *,
-    task_id: Optional[str],
-    task_instruction: str,
     middle_messages: List[Dict[str, Any]],
     model: str = SUMMARY_MODEL,
 ) -> str:
@@ -151,11 +151,8 @@ async def summarize_messages_with_vllm(
         "Authorization": f"Bearer {SUMMARY_VLLM_API_KEY or 'EMPTY'}",
     }
 
-    # progressively shrink prompt if needed
     clip_sizes = [2500, 1200, 600, 300, 150]
-    msg_caps   = [60, 30, 15, 8, 4, 2]
-
-    # completion budget to try (also shrinks if vLLM complains)
+    msg_caps = [60, 30, 15, 8, 4, 2]
     max_tokens_try = [600, 300, 150, 80, 40]
 
     timeout = httpx.Timeout(60.0, connect=10.0)
@@ -166,15 +163,8 @@ async def summarize_messages_with_vllm(
                 middle_blob = "\n\n".join(_render_msg(m, clip) for m in mids)
 
                 user = (
-                    f"Task ID: {task_id or 'unknown'}\n\n"
-                    f"Original task instruction (keep exact intent):\n{task_instruction}\n\n"
                     "Conversation segment to summarize:\n"
-                    f"{middle_blob}\n\n"
-                    "Return ONLY the summary, in this structured format:\n"
-                    "1) Progress so far (3-6 bullets)\n"
-                    "2) Key facts / state discovered (bullets)\n"
-                    "3) Failure modes / repeated mistakes (bullets)\n"
-                    "4) Next best actions (bullets)\n"
+                    f"{middle_blob}\n"
                 )
 
                 for mt in max_tokens_try:
@@ -187,7 +177,6 @@ async def summarize_messages_with_vllm(
                         "temperature": 0.0,
                         "max_tokens": mt,
                         "stream": False,
-                        **({"user": task_id} if task_id else {}),
                     }
 
                     r = await client.post(SUMMARY_VLLM_CHAT_URL, json=payload, headers=headers)
@@ -196,7 +185,7 @@ async def summarize_messages_with_vllm(
                         data = r.json()
                         return data["choices"][0]["message"].get("content", "")
 
-                    # Only handle context-length 400s; otherwise bail out of inner loops
+                    # Only handle context-length 400s; otherwise bail out
                     if r.status_code != 400:
                         break
 
@@ -204,12 +193,10 @@ async def summarize_messages_with_vllm(
                     if not ctx:
                         break  # some other 400
 
-                    # If prompt itself is too large (or nearly), don't keep lowering max_tokens; shrink prompt instead
                     max_ctx, input_toks, _req = ctx
                     if (max_ctx - input_toks) <= 256:
-                        break  # go shrink (clip/cap) more
+                        break  # shrink prompt further (clip/cap) rather than only lowering max_tokens
 
-        # If everything fails, return a small safe summary instead of crashing the proxy
         raise HTTPException(
             status_code=400,
             detail=(
@@ -306,84 +293,52 @@ async def maybe_summarize_payload(
     task_id: Optional[str],
     force: bool = False,
 ) -> Dict[str, Any]:
-    """
-    If enabled and the message history is large, replace the middle chunk with a summary message.
-    Preserves:
-      - system message (if any)
-      - the first user instruction (task)
-      - last K messages verbatim
-    Summarizes:
-      - messages between first user instruction and the last K messages
-    """
     if not ENABLE_CONTEXT_SUMMARY and not force:
-        print(f"[SUMMARY]: nothing being summarized")
         return clamp_max_tokens_for_vllm(payload)
 
     messages = payload.get("messages") or []
-    if not isinstance(messages, list) or len(messages) < 6: # could probably have this as an env setting
-        print(f"[SUMMARY]: nothing being summarized")
+    if not isinstance(messages, list) or len(messages) < 6:
         return clamp_max_tokens_for_vllm(payload)
 
     total_chars, approx_toks = payload_size(messages)
     if not force and total_chars < SUMMARY_CHAR_THRESHOLD and approx_toks < SUMMARY_TOKEN_THRESHOLD:
-        print(f"[SUMMARY]: nothing being summarized")
         return clamp_max_tokens_for_vllm(payload)
 
-    system_msg, first_user_idx = find_system_and_first_user(messages)
-    if first_user_idx is None:
-        # no clear task instruction; we can still summarize, but it's riskier
-        first_user_idx = 0
+    n = max(1, KEEP_FIRST_N)
+    k = max(1, KEEP_LAST_K)
 
-    # Decide “tail” to keep
-    k = max(2, KEEP_LAST_K)
-    tail = messages[-k:]
+    # Optional: "pin" a system message at the front even if N doesn't include it.
+    pinned_system: Optional[Dict[str, Any]] = None
+    if messages and messages[0].get("role") == "system": # this wont exist for react tempalte in appworld
+        pinned_system = messages[0]
 
-    # Identify the middle region to summarize:
-    # from (first_user_idx+1) up to start of tail (exclusive)
-    middle_start = first_user_idx + 1
-    middle_end = max(middle_start, len(messages) - k)
-    middle = messages[middle_start:middle_end]
+    # Build first/last windows (excluding pinned system from window math if you want)
+    start_idx = 1 if pinned_system else 0
+    core = messages[start_idx:]  # messages without pinned system
 
-    # If there’s nothing meaningful to summarize, skip
+    if len(core) <= (n + k):
+        # Not enough to justify a summary; just clamp and return
+        return clamp_max_tokens_for_vllm(payload)
+
+    first = core[:n]
+    last = core[-k:]
+
+    middle = core[n:len(core) - k]
     if len(middle) < 2:
-        print(f"[SUMMARY]: nothing being summarized")
-        return payload
-
-    task_instruction = messages[first_user_idx].get("content") or ""
-    if not isinstance(task_instruction, str):
-        task_instruction = str(task_instruction)
-
-    # summary_text = await summarize_messages_with_openai(
-    #     task_id=task_id,
-    #     task_instruction=system_msg + task_instruction,
-    #     middle_messages=middle,
-    # )
-    system_text = ""
-    if system_msg and isinstance(system_msg.get("content"), str):
-        system_text = system_msg["content"]
+        return clamp_max_tokens_for_vllm(payload)
 
     summary_text = await summarize_messages_with_vllm(
-        task_id=task_id,
-        task_instruction=(system_text + "\n\n" + task_instruction).strip(),
-        middle_messages=middle,
+        middle_messages=middle
     )
 
-    print(f"\n\n[SUMMARY]: system text: {system_text} \n\n")
-    print(f"\n\n[SUMMARY]: task_instruction: {task_instruction} \n\n")
-    print(f"\n\n[SUMMARY]: middle: {middle} \n\n")
-    print(f"\n\n[SUMMARY]: after: {summary_text} \n\n")
-
-    # Build new message list:
     new_messages: List[Dict[str, Any]] = []
+    if pinned_system is not None:
+        new_messages.append(pinned_system)
 
-    # Keep system message first (exactly one), if present
-    if system_msg is not None:
-        new_messages.append(system_msg)
+    # Keep first N verbatim
+    new_messages.extend(first)
 
-    # Keep the task instruction user message verbatim
-    new_messages.append(messages[first_user_idx])
-
-    # Insert a synthetic “summary” message
+    # Insert summary
     new_messages.append(
         {
             "role": "assistant",
@@ -394,11 +349,9 @@ async def maybe_summarize_payload(
         }
     )
 
-    new_messages.extend(tail)
+    # Keep last K verbatim
+    new_messages.extend(last)
 
     new_payload = dict(payload)
     new_payload["messages"] = new_messages
-
-    # Now clamp based on the NEW messages
-    new_payload = clamp_max_tokens_for_vllm(new_payload)
-    return new_payload
+    return clamp_max_tokens_for_vllm(new_payload)
