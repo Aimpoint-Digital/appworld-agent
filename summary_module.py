@@ -393,6 +393,8 @@ async def maybe_summarize_payload(
         }
     )
 
+    new_messages.extend(tail)
+
     new_payload = dict(payload)
     new_payload["messages"] = new_messages
 
