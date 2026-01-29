@@ -140,6 +140,7 @@ async def summarize_messages_with_vllm(
         "- No-op executions (tool call made but no state change; empty changed_records; task claims success without effects)\n"
         "- Pagination or incomplete iteration issues (only first page fetched, missing cursor/offset handling)\n"
         "- Repeated or looping actions that failed similarly\n\n"
+        "- If the assistant has completed the task, but has not explicitly called the completion API, return the codeblock to call that API, like   ```python \n apis.supervisor.complete_task(answer=23)\n\n"
         "If none of the above occurred, say so explicitly.\n"
         "Prefer concrete evidence over interpretation (tool names, error messages, observed outcomes).\n"
     )
@@ -314,14 +315,17 @@ async def maybe_summarize_payload(
       - messages between first user instruction and the last K messages
     """
     if not ENABLE_CONTEXT_SUMMARY and not force:
+        print(f"[SUMMARY]: nothing being summarized")
         return clamp_max_tokens_for_vllm(payload)
 
     messages = payload.get("messages") or []
     if not isinstance(messages, list) or len(messages) < 6: # could probably have this as an env setting
+        print(f"[SUMMARY]: nothing being summarized")
         return clamp_max_tokens_for_vllm(payload)
 
     total_chars, approx_toks = payload_size(messages)
     if not force and total_chars < SUMMARY_CHAR_THRESHOLD and approx_toks < SUMMARY_TOKEN_THRESHOLD:
+        print(f"[SUMMARY]: nothing being summarized")
         return clamp_max_tokens_for_vllm(payload)
 
     system_msg, first_user_idx = find_system_and_first_user(messages)
@@ -341,6 +345,7 @@ async def maybe_summarize_payload(
 
     # If there’s nothing meaningful to summarize, skip
     if len(middle) < 2:
+        print(f"[SUMMARY]: nothing being summarized")
         return payload
 
     task_instruction = messages[first_user_idx].get("content") or ""
@@ -361,6 +366,11 @@ async def maybe_summarize_payload(
         task_instruction=(system_text + "\n\n" + task_instruction).strip(),
         middle_messages=middle,
     )
+
+    print(f"\n\n[SUMMARY]: system text: {system_text} \n\n")
+    print(f"\n\n[SUMMARY]: task_instruction: {task_instruction} \n\n")
+    print(f"\n\n[SUMMARY]: middle: {middle} \n\n")
+    print(f"\n\n[SUMMARY]: after: {summary_text} \n\n")
 
     # Build new message list:
     new_messages: List[Dict[str, Any]] = []

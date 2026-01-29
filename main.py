@@ -327,6 +327,14 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(VLLM_CHAT_URL, json=payload, headers={"Authorization": "Bearer EMPTY"})
 
+    log_event(
+        "vllm.raw_response",
+        request_id=request_id,
+        task_id=task_id,
+        status_code=r.status_code,
+        raw_preview=r.text[:4000],  # avoid blowing up logs
+    )
+
     if r.status_code >= 400:
         log_event(
             "request.vllm_error",
