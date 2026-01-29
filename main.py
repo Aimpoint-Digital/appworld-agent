@@ -220,7 +220,7 @@ async def get_fix_suggestion_from_vllm(
         "model": model,
         "messages": messages,
         "temperature": 0.0,
-        "max_tokens": 400,
+        "max_tokens": 1000,
         "stream": False,
         **({"user": task_id} if task_id else {}),
     }
