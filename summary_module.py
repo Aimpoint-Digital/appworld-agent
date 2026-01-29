@@ -143,6 +143,7 @@ async def summarize_messages_with_vllm(
         "- If the assistant has completed the task, but has not explicitly called the completion API, return the codeblock to call that API, like   ```python \n apis.supervisor.complete_task(answer=23)\n\n"
         "If none of the above occurred, say so explicitly.\n"
         "Prefer concrete evidence over interpretation (tool names, error messages, observed outcomes).\n"
+        "IMPORTANT: ENSURE THAT PREVIOUSLY EXTRACTED RESULTS SUCH AS ACCESS TOKENS, CREDENTIALS, API OUTPUTS, ETC, ARE RETURNED VERBATIM AS PART OF YOUR RESPONSE.\n"
     )
 
     headers = {
