@@ -108,7 +108,7 @@ def looks_like_error(world_out: Any) -> bool:
         return False
     return any(re.search(p, world_out, flags=re.MULTILINE) for p in ERROR_PATTERNS)
 
-
+# NOTE: could try to force a code response after pondering, rather than possibly only returning reasoning content
 async def get_fix_suggestion_from_vllm(
     task_id: Optional[str],
     code: str,
@@ -119,11 +119,45 @@ async def get_fix_suggestion_from_vllm(
     messages = [
         {
           "role": "system",
+          # "content": (
+          #     "You are debugging Python code executed inside AppWorld.\n"
+          #     "Your job is to produce a SHORT, ACTIONABLE intervention that the agent can use immediately.\n"
+          #     "Do NOT ask questions. Do NOT use input(). Do NOT invent tool outputs or facts.\n"
+          #     "Prefer concrete edits to the code and specific API/tool call corrections.\n\n"
+          #     "Classify the failure using ONE primary category from this list:\n"
+          #     "- missing_api_call_or_wrong_api_name\n"
+          #     "- wrong_api_parameters_or_schema_mismatch\n"
+          #     "- pagination_or_incomplete_iteration\n"
+          #     "- auth_or_credentials_issue\n"
+          #     "- reasoning_or_planning_error\n"
+          #     "- repetition_or_loop\n"
+          #     "- tooling_runtime_error\n"
+          #     "- formatting_or_code_block_error\n"
+          #     "- other\n\n"
+          #     "Output format (exact):\n"
+          #     "PRIMARY_CATEGORY: <one from list>\n"
+          #     "EVIDENCE: <1-3 short quotes from the execution output>\n"
+          #     "DIAGNOSIS: <1-2 sentences>\n"
+          #     "FIX_STEPS:\n"
+          #     "- <2-6 concrete bullet steps>\n"
+          #     "PATCH:\n"
+          #     "- OPTIONAL\n"
+          #     "- If no patch is needed, write exactly: PATCH: (omitted)\n"
+          #     "- If a patch IS provided, PATCH must contain ONLY a single fenced code block\n"
+          #     "- The fenced block MUST use this exact format:\n"
+          #     "```python\n"
+          #     "<corrected code>\n"
+          #     "```\n"
+          #     "- Do NOT include any explanation before or after the fenced block\n"
+          #     "\n"
+          #     "Before responding, verify that any PATCH provided follows the fencing rules exactly."
+          # ),
           "content": (
               "You are debugging Python code executed inside AppWorld.\n"
-              "Your job is to produce a SHORT, ACTIONABLE intervention message that the agent can use immediately.\n"
+              "Your job is to produce a SHORT, ACTIONABLE intervention that the agent can use immediately.\n"
               "Do NOT ask questions. Do NOT use input(). Do NOT invent tool outputs or facts.\n"
-              "Prefer concrete edits to the code and specific API/tool call corrections.\n\n"
+              "You MUST base corrections on the provided API docs text when available.\n\n"
+
               "Classify the failure using ONE primary category from this list:\n"
               "- missing_api_call_or_wrong_api_name\n"
               "- wrong_api_parameters_or_schema_mismatch\n"
@@ -134,6 +168,7 @@ async def get_fix_suggestion_from_vllm(
               "- tooling_runtime_error\n"
               "- formatting_or_code_block_error\n"
               "- other\n\n"
+
               "Output format (exact):\n"
               "PRIMARY_CATEGORY: <one from list>\n"
               "EVIDENCE: <1-3 short quotes from the execution output>\n"
@@ -141,16 +176,24 @@ async def get_fix_suggestion_from_vllm(
               "FIX_STEPS:\n"
               "- <2-6 concrete bullet steps>\n"
               "PATCH:\n"
-              "- OPTIONAL\n"
-              "- If no patch is needed, write exactly: PATCH: (omitted)\n"
-              "- If a patch IS provided, PATCH must contain ONLY a single fenced code block\n"
-              "- The fenced block MUST use this exact format:\n"
               "```python\n"
               "<corrected code>\n"
-              "```\n"
-              "- Do NOT include any explanation before or after the fenced block\n"
-              "\n"
-              "Before responding, verify that any PATCH provided follows the fencing rules exactly."
+              "```\n\n"
+
+              "PATCH RULES (strict):\n"
+              "- PATCH IS REQUIRED. Never output PATCH: (omitted).\n"
+              "- PATCH must contain ONLY a single fenced python code block (no prose before/after).\n"
+              "- The code MUST be directly executable in AppWorld.\n"
+              "- The code MUST perform at least one AppWorld API call (e.g., apis.<app>.<api>(...)).\n"
+              "- If the fix is uncertain, still output a minimal executable patch that gathers the missing info via API docs,\n"
+              "  e.g. print(apis.api_docs.show_api_doc(app_name=..., api_name=...)) and then returns/prints what to do next.\n"
+              "- If the failure relates to task completion, the patch MUST call apis.supervisor.complete_task(...) when appropriate.\n"
+              "- When using API calls, match parameter names exactly as shown in the provided API docs.\n\n"
+
+              "Before responding, verify:\n"
+              "- Output matches the exact format.\n"
+              "- PATCH exists and is a single ```python fenced block.\n"
+              "- PATCH includes at least one apis.* call.\n"
           ),
         },
         {
@@ -234,7 +277,7 @@ async def post_process_assistant_message(
                 if m.get("role") != "assistant":
                     continue
                 msg_content = m.get("content") or ""
-                code, _text = code_extractor(msg_content)  # must exist in your project
+                code, _text = code_extractor(msg_content)  # NOTE: summarization could make this brittle
                 if code:
                     world.execute(code)
 
