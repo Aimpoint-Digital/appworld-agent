@@ -60,6 +60,7 @@ def log_event(event: str, **fields: Any) -> None:
 
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001")
 VLLM_CHAT_URL = f"{VLLM_BASE_URL}/v1/chat/completions"
+VLLM_MODEL = os.getenv("VLLM_MODEL")
 
 ERROR_PATTERNS = [
     r"^Execution failed",  # AppWorld standard
@@ -114,7 +115,7 @@ async def get_fix_suggestion_from_vllm(
     code: str,
     world_out: str,
     api_docs_text: str = "",
-    model: str = "Qwen/Qwen3-8B",
+    model: str = VLLM_MODEL,
 ) -> str:
     messages = [
         {
@@ -308,7 +309,7 @@ async def post_process_assistant_message(
                     code=new_code,
                     world_out=world_out,
                     api_docs_text=api_docs_text,
-                    model="Qwen/Qwen3-8B",
+                    model=VLLM_MODEL,
                 )
                 log_event(
                     "intervention.curated",

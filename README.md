@@ -526,3 +526,5 @@ had to set openai var. for baseline make sure vllm running on 8000. for qwen awq
 vllm serve Qwen/Qwen3-8B-AWQ   --port 8000   --max-model-len 32768   --max-num-seqs 1   --gpu-memory-utilization 0.90   --enable-chunked-prefill
 
 had to change name in config file of model in appworld env
+
+reset appwrold root after reboot export APPWORLD_ROOT=/home/ubuntu/appworld-source/appworld_source/appworld
