@@ -497,3 +497,32 @@ python scripts/classify_failures.py \
    `./experiments/outputs/{experiment_name}/tasks/{task_id}/dbs`
 
 So don’t reuse the same `{experiment_name}` across runs unless you really intend to overwrite.
+
+
+---------------------------------------
+/home/ubuntu/appworld-source/appworld_source/appworld/experiments/outputs/simplified_react_code_agent/vllm_local/vllm-local-8000-qwen3-8b/test_normal
+
+
+setup and run baseline:
+
+clone appworld fork
+
+clone appworld-agents
+
+make 3 venvs, can you use tmux in signularity? no do via exec commands in container file
+
+need to make sure env set up, reqs are set up. need separate venvs for appworl and vllm/fastapi
+
+clone each and install
+
+for appworld, need to make the jsonnet config, add to model registry, 
+
+test quantization and remove diff 1 and 2
+
+appworld run auto   --agent-name simplified_react_code_agent   --model-name vllm-local-8000-qwen3-8b   --dataset-name test_normal
+
+changing models:
+had to set openai var. for baseline make sure vllm running on 8000. for qwen awq serving via
+vllm serve Qwen/Qwen3-8B-AWQ   --port 8000   --max-model-len 32768   --max-num-seqs 1   --gpu-memory-utilization 0.90   --enable-chunked-prefill
+
+had to change name in config file of model in appworld env

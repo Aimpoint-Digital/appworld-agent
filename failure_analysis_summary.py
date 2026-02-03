@@ -2,8 +2,10 @@ import json
 from collections import Counter, defaultdict
 import numpy as np
 
+filepath = input("Please enter filepath of the full analysis summary json from extract_failure_modes")
+
 # Load results
-with open("failure_analysis_test_normal_present.json") as f:
+with open(filepath) as f:
     data = json.load(f)
 
 failures = data["failures"]
