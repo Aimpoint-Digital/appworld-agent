@@ -213,7 +213,7 @@ async def maybe_summarize_payload(
     force: bool = False,
 ) -> Dict[str, Any]:
     if not ENABLE_CONTEXT_SUMMARY and not force:
-        return clamp_max_tokens_for_vllm(payload)
+        return payload
 
     messages = payload.get("messages") or []
     if not isinstance(messages, list) or len(messages) < 6:

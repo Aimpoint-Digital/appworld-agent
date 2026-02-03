@@ -528,3 +528,7 @@ vllm serve Qwen/Qwen3-8B-AWQ   --port 8000   --max-model-len 32768   --max-num-s
 had to change name in config file of model in appworld env
 
 reset appwrold root after reboot export APPWORLD_ROOT=/home/ubuntu/appworld-source/appworld_source/appworld
+
+/home/ubuntu/appworld-agents/appworld-agent/failure_analysis_test_normal_basemodel_full_context_qwen8b.json
+
+changed model name in intercept env file
