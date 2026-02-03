@@ -2,7 +2,7 @@ import json
 from collections import Counter, defaultdict
 import numpy as np
 
-filepath = input("Please enter filepath of the full analysis summary json from extract_failure_modes")
+filepath = input("Please enter filepath of the full analysis summary json from extract_failure_modes:\n> ").strip()
 
 # Load results
 with open(filepath) as f:
