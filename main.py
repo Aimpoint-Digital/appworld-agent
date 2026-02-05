@@ -13,7 +13,7 @@ from dotenv import load_dotenv, find_dotenv
 
 from appworld import AppWorld
 from summary_module import maybe_summarize_payload
-from utils.helpers import code_extractor, extract_api_calls
+from utils.helpers import code_extractor, extract_api_calls, _strip_think_tags, _extract_patch_from_curated,_count_consecutive_no_code_assistant_msgs, _build_api_docs_context
 
 load_dotenv(find_dotenv())
 
@@ -120,39 +120,6 @@ async def get_fix_suggestion_from_vllm(
     messages = [
         {
           "role": "system",
-          # "content": (
-          #     "You are debugging Python code executed inside AppWorld.\n"
-          #     "Your job is to produce a SHORT, ACTIONABLE intervention that the agent can use immediately.\n"
-          #     "Do NOT ask questions. Do NOT use input(). Do NOT invent tool outputs or facts.\n"
-          #     "Prefer concrete edits to the code and specific API/tool call corrections.\n\n"
-          #     "Classify the failure using ONE primary category from this list:\n"
-          #     "- missing_api_call_or_wrong_api_name\n"
-          #     "- wrong_api_parameters_or_schema_mismatch\n"
-          #     "- pagination_or_incomplete_iteration\n"
-          #     "- auth_or_credentials_issue\n"
-          #     "- reasoning_or_planning_error\n"
-          #     "- repetition_or_loop\n"
-          #     "- tooling_runtime_error\n"
-          #     "- formatting_or_code_block_error\n"
-          #     "- other\n\n"
-          #     "Output format (exact):\n"
-          #     "PRIMARY_CATEGORY: <one from list>\n"
-          #     "EVIDENCE: <1-3 short quotes from the execution output>\n"
-          #     "DIAGNOSIS: <1-2 sentences>\n"
-          #     "FIX_STEPS:\n"
-          #     "- <2-6 concrete bullet steps>\n"
-          #     "PATCH:\n"
-          #     "- OPTIONAL\n"
-          #     "- If no patch is needed, write exactly: PATCH: (omitted)\n"
-          #     "- If a patch IS provided, PATCH must contain ONLY a single fenced code block\n"
-          #     "- The fenced block MUST use this exact format:\n"
-          #     "```python\n"
-          #     "<corrected code>\n"
-          #     "```\n"
-          #     "- Do NOT include any explanation before or after the fenced block\n"
-          #     "\n"
-          #     "Before responding, verify that any PATCH provided follows the fencing rules exactly."
-          # ),
           "content": (
               "You are debugging Python code executed inside AppWorld.\n"
               "Your job is to produce a SHORT, ACTIONABLE intervention that the agent can use immediately.\n"
@@ -238,7 +205,7 @@ async def get_fix_suggestion_from_vllm(
     data = r.json()
     return data["choices"][0]["message"].get("content", "")
 
-#NOTE: clamping and token limits are preventing full code edits from editor model
+
 async def post_process_assistant_message(
     assistant_message: Dict[str, Any],
     task_id: Optional[str],
@@ -271,57 +238,92 @@ async def post_process_assistant_message(
     new_code: Optional[str] = None
     curated: Optional[str] = None
 
-    # before testing the new code, we need to recreate DB state
     try:
         with AppWorld(task_id=task_id, experiment_name=experiment_name) as world:
-            # Replay: all assistant messages from history (excluding latest; history includes user+assistant)
+            # Replay history
             for m in history:
                 if m.get("role") != "assistant":
                     continue
                 msg_content = m.get("content") or ""
-                code, _text = code_extractor(msg_content)  # NOTE: summarization could make this brittle
+                code, _text = code_extractor(msg_content)
                 if code:
                     world.execute(code)
 
-            # Execute newest assistant message
             new_code, _new_text = code_extractor(content)
-            if new_code:
-                world_out = world.execute(new_code)
 
-            if world_out is not None and looks_like_error(world_out) and new_code:
+            # --- NO-CODE LOOP BREAKER ---
+            if not new_code:
+                consecutive = _count_consecutive_no_code_assistant_msgs(history)
+                
+                if consecutive >= 2:
+                    # Model is stuck in prose loop — inject API discovery
+                    api_docs_text = _build_api_docs_context(world, new_code=None)
+                    
+                    curated = await get_fix_suggestion_from_vllm(
+                        task_id=task_id,
+                        code="# (model produced no executable code)",
+                        world_out=(
+                            f"The agent has produced {consecutive + 1} consecutive "
+                            f"messages with no code. Last message excerpt:\n"
+                            f"{content[:500]}"
+                        ),
+                        api_docs_text=api_docs_text,
+                    )
+                    
+                    patch_code = _extract_patch_from_curated(curated or "")
+                    if patch_code:
+                        assistant_message["content"] = f"```python\n{patch_code}\n```"
+                    else:
+                        # Deterministic fallback: just discover APIs
+                        assistant_message["content"] = (
+                            "```python\n"
+                            "print(apis.api_docs.show_app_descriptions())\n"
+                            "```"
+                        )
+                    
+                    log_event("intervention.no_code_loop_break",
+                              request_id=request_id, task_id=task_id,
+                              consecutive_no_code=consecutive + 1)
+                    return assistant_message
+                
+                # First time no code — let it pass, might be planning
+                return assistant_message
 
-                # get documentation for the api being called
-                api_docs_text = ""
-                if new_code:
-                    calls = extract_api_calls(new_code)
-                    if calls:
-                        docs_chunks = []
-                        for app_name, api_name in calls[:5]:  # cap to avoid huge payloads
-                            try:
-                                doc = world.apis.api_docs.show_api_doc(app_name=app_name, api_name=api_name)
-                                docs_chunks.append(f"apis.{app_name}.{api_name} spec:\n{json.dumps(doc, indent=2)[:4000]}")
-                            except Exception as e:
-                                docs_chunks.append(f"apis.{app_name}.{api_name} spec: <failed to load: {e}>")
-                        api_docs_text = "\n\n".join(docs_chunks)
+            # --- NORMAL PATH: code was extracted, execute it ---
+            world_out = world.execute(new_code)
+
+            if world_out is not None and looks_like_error(world_out):
+                api_docs_text = _build_api_docs_context(world, new_code)
 
                 curated = await get_fix_suggestion_from_vllm(
                     task_id=task_id,
                     code=new_code,
                     world_out=world_out,
                     api_docs_text=api_docs_text,
-                    model=VLLM_MODEL,
-                )
-                log_event(
-                    "intervention.curated",
-                    request_id=request_id,
-                    task_id=task_id,
-                    curated_preview=(curated or "")[:800],
                 )
 
-                # If you want to replace assistant content with the curated suggestion:
-                assistant_message["content"] = curated
+                # Extract just the patch, not the full diagnostic
+                patch_code = _extract_patch_from_curated(curated or "")
+                if patch_code:
+                    assistant_message["content"] = f"```python\n{patch_code}\n```"
+                else:
+                    # Fix model failed too — fall back to doc discovery for the apps involved
+                    calls = extract_api_calls(new_code)
+                    if calls:
+                        app_name = calls[0][0]
+                        assistant_message["content"] = (
+                            f"```python\n"
+                            f"print(apis.api_docs.show_api_descriptions(app_name='{app_name}'))\n"
+                            f"```"
+                        )
+                    else:
+                        assistant_message["content"] = content
+
+                log_event("intervention.curated", request_id=request_id,
+                          task_id=task_id,
+                          curated_preview=(curated or "")[:800],
+                          patch_extracted=bool(patch_code))
             else:
-                # Leave original assistant content intact
                 assistant_message["content"] = content
 
 

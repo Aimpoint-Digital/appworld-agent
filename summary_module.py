@@ -16,7 +16,7 @@ ENABLE_CONTEXT_SUMMARY = os.getenv("ENABLE_CONTEXT_SUMMARY", "0") == "1"
 SUMMARY_CHAR_THRESHOLD = int(os.getenv("SUMMARY_CHAR_THRESHOLD", "24000"))  # raw chars across all message content
 SUMMARY_TOKEN_THRESHOLD = int(os.getenv("SUMMARY_TOKEN_THRESHOLD", "6000"))  # approximate tokens
 KEEP_LAST_K = int(os.getenv("SUMMARY_KEEP_LAST_K", "6"))  # keep last K messages verbatim
-SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "Qwen/Qwen3-8B")  
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "Qwen/Qwen3-8B-AWQ")  
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 SUMMARY_VLLM_BASE_URL = os.getenv("SUMMARY_VLLM_BASE_URL", os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001"))
