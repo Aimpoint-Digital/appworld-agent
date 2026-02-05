@@ -1,5 +1,5 @@
 import re
-from typing import List, Tuple, Optional, Sequence
+from typing import List, Tuple, Optional, Sequence, Dict
 
 def code_extractor(text: str, ignore_multiple_calls: bool = True) -> tuple[str, str]:
     """
