@@ -14,6 +14,7 @@ from dotenv import load_dotenv, find_dotenv
 from appworld import AppWorld
 from summary_module import maybe_summarize_payload
 from utils.helpers import code_extractor, extract_api_calls, _strip_think_tags, _extract_patch_from_curated,_count_consecutive_no_code_assistant_msgs, _build_api_docs_context
+from state_registry import StateRegistry, CAPTURE_SUFFIX
 
 load_dotenv(find_dotenv())
 
@@ -23,6 +24,7 @@ load_dotenv(find_dotenv())
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_PATH = os.getenv("PROXY_LOG_PATH", "proxy_interventions.log")
+ENABLE_STATE_REGISTRY = os.getenv("ENABLE_STATE_REGISTRY", "1") == "1"
 
 logger = logging.getLogger("appworld_proxy")
 logger.setLevel(LOG_LEVEL)
@@ -116,6 +118,7 @@ async def get_fix_suggestion_from_vllm(
     world_out: str,
     api_docs_text: str = "",
     model: str = VLLM_MODEL,
+    state_context: str = ""
 ) -> str:
     messages = [
         {
@@ -125,6 +128,7 @@ async def get_fix_suggestion_from_vllm(
               "Your job is to produce a SHORT, ACTIONABLE intervention that the agent can use immediately.\n"
               "Do NOT ask questions. Do NOT use input(). Do NOT invent tool outputs or facts.\n"
               "You MUST base corrections on the provided API docs text when available.\n\n"
+              "You MUST use the provided variable state when available — do NOT re-derive values that already exist.\n"
 
               "Classify the failure using ONE primary category from this list:\n"
               "- missing_api_call_or_wrong_api_name\n"
@@ -155,8 +159,9 @@ async def get_fix_suggestion_from_vllm(
               "- The code MUST perform at least one AppWorld API call (e.g., apis.<app>.<api>(...)).\n"
               "- If the fix is uncertain, still output a minimal executable patch that gathers the missing info via API docs,\n"
               "  e.g. print(apis.api_docs.show_api_doc(app_name=..., api_name=...)) and then returns/prints what to do next.\n"
-              "- If the failure relates to task completion, the patch MUST call apis.supervisor.complete_task(...) when appropriate.\n"
+              # "- If the failure relates to task completion, the patch MUST call apis.supervisor.complete_task(...) when appropriate.\n"
               "- When using API calls, match parameter names exactly as shown in the provided API docs.\n\n"
+              "- REUSE existing variables from the VARIABLES section below — do NOT re-login or re-fetch values that are already available.\n"
 
               "Before responding, verify:\n"
               "- Output matches the exact format.\n"
@@ -168,7 +173,8 @@ async def get_fix_suggestion_from_vllm(
             "role": "user",
             "content": (
                 f"Task id: {task_id}\n\n"
-                "The following code was executed and failed.\n\n"
+                + (f"{state_context}\n\n" if state_context else "")
+                + "The following code was executed and failed.\n\n"
                 "Code:\n"
                 f"```python\n{code}\n```\n\n"
                 "Execution output:\n"
@@ -240,6 +246,10 @@ async def post_process_assistant_message(
 
     try:
         with AppWorld(task_id=task_id, experiment_name=experiment_name) as world:
+            # Registry for tracking key vars
+            registry = StateRegistry()
+
+
             # Replay history
             for m in history:
                 if m.get("role") != "assistant":
@@ -247,7 +257,18 @@ async def post_process_assistant_message(
                 msg_content = m.get("content") or ""
                 code, _text = code_extractor(msg_content)
                 if code:
-                    world.execute(code)
+                    out = world.execute(code)
+                    if ENABLE_STATE_REGISTRY and not looks_like_error(out):
+                        state_out = world.execute(CAPTURE_SUFFIX)
+                        registry.update_from_replay_output(state_out)
+
+            log_event(
+                "intervention.registry_state_captured",
+                request_id=request_id,
+                task_id=task_id,
+                num_bindings=len(registry.bindings),
+                binding_keys=list(registry.bindings.keys()),
+            )
 
             new_code, _new_text = code_extractor(content)
 
@@ -268,6 +289,7 @@ async def post_process_assistant_message(
                             f"{content[:500]}"
                         ),
                         api_docs_text=api_docs_text,
+                        state_context=registry.format_for_prompt(),
                     )
                     
                     patch_code = _extract_patch_from_curated(curated or "")
@@ -300,6 +322,7 @@ async def post_process_assistant_message(
                     code=new_code,
                     world_out=world_out,
                     api_docs_text=api_docs_text,
+                    state_context=registry.format_for_prompt(),
                 )
 
                 # Extract just the patch, not the full diagnostic
