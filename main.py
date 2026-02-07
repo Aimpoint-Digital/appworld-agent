@@ -53,7 +53,7 @@ def log_event(event: str, **fields: Any) -> None:
         "ts": datetime.utcnow().isoformat() + "Z",
         **fields,
     }
-    logger.info(json.dumps(payload, ensure_ascii=False))
+    logger.info("\n\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 # -------------------------
