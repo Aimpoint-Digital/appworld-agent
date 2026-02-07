@@ -224,9 +224,20 @@ def _build_api_docs_context(world, new_code: Optional[str], world_out: Optional[
 
 def _extract_failed_app_from_error(world_out: str, new_code: str) -> Optional[str]:
     """Get the app name from the actual failure."""
+    if not world_out:
+        return None
+    
+    # Pattern 1: "No API named 'X' found in the Y app"
     match = re.search(r"found in the (\w+) app", world_out)
     if match:
         return match.group(1)
+    
+    # Pattern 2: Auth/runtime errors - extract from traceback
+    # Look for "apis.APP.method" in the traceback
+    match = re.search(r"apis\.(\w+)\.\w+", world_out)
+    if match:
+        return match.group(1)
+    
     return None
 
 
