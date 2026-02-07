@@ -315,7 +315,7 @@ async def post_process_assistant_message(
             world_out = world.execute(new_code)
 
             if world_out is not None and looks_like_error(world_out):
-                api_docs_text = _build_api_docs_context(world, new_code)
+                api_docs_text = _build_api_docs_context(world, new_code, world_out)
 
                 curated = await get_fix_suggestion_from_vllm(
                     task_id=task_id,
@@ -331,16 +331,31 @@ async def post_process_assistant_message(
                     assistant_message["content"] = f"```python\n{patch_code}\n```"
                 else:
                     # Fix model failed too — fall back to doc discovery for the apps involved
-                    calls = extract_api_calls(new_code)
-                    if calls:
-                        app_name = calls[0][0]
+                    # calls = extract_api_calls(new_code)
+                    # if calls:
+                    #     app_name = calls[0][0]
+                    #     assistant_message["content"] = (
+                    #         f"```python\n"
+                    #         f"print(apis.api_docs.show_api_descriptions(app_name='{app_name}'))\n"
+                    #         f"```"
+                    #     )
+                    # else:
+                    #     assistant_message["content"] = content
+                    # Fix model failed too — fall back to doc discovery for the failing app
+                    failed_app = _extract_failed_app_from_error(world_out, new_code)
+                    if failed_app:
                         assistant_message["content"] = (
                             f"```python\n"
-                            f"print(apis.api_docs.show_api_descriptions(app_name='{app_name}'))\n"
+                            f"print(apis.api_docs.show_api_descriptions(app_name='{failed_app}'))\n"
                             f"```"
                         )
                     else:
-                        assistant_message["content"] = content
+                        # Can't determine failing app, show all
+                        assistant_message["content"] = (
+                            "```python\n"
+                            "print(apis.api_docs.show_app_descriptions())\n"
+                            "```"
+                        )
 
                 log_event("intervention.curated", request_id=request_id,
                           task_id=task_id,
