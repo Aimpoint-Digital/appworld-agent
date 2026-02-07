@@ -13,7 +13,7 @@ from dotenv import load_dotenv, find_dotenv
 
 from appworld import AppWorld
 from summary_module import maybe_summarize_payload
-from utils.helpers import code_extractor, extract_api_calls, _strip_think_tags, _extract_patch_from_curated,_count_consecutive_no_code_assistant_msgs, _build_api_docs_context
+from utils.helpers import code_extractor, extract_api_calls, _strip_think_tags, _extract_patch_from_curated,_count_consecutive_no_code_assistant_msgs, _extract_failed_app_from_error , _build_api_docs_context
 from state_registry import StateRegistry, CAPTURE_SUFFIX
 
 load_dotenv(find_dotenv())
