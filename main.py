@@ -160,6 +160,10 @@ async def get_fix_suggestion_from_vllm(
               "- If the fix is uncertain, still output a minimal executable patch that gathers the missing info via API docs,\n"
               "  e.g. print(apis.api_docs.show_api_doc(app_name=..., api_name=...)) and then returns/prints what to do next.\n"
               # "- If the failure relates to task completion, the patch MUST call apis.supervisor.complete_task(...) when appropriate.\n"
+              "- NEVER call apis.supervisor.complete_task() in your patch. "
+              "- NEVER call apis.supervisor.complete_task() in your patch. "
+              "  The patch should fix the immediate error, not complete the task. "
+              "  Task completion happens only after all steps succeed.\n"
               "- When using API calls, match parameter names exactly as shown in the provided API docs.\n\n"
               "- REUSE existing variables from the VARIABLES section below — do NOT re-login or re-fetch values that are already available.\n"
 
