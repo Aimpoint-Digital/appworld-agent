@@ -18,15 +18,18 @@ load_dotenv(find_dotenv())
 # Utilities
 # -------------------------
 
+
 def read_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
 
 def read_text(path: Path, max_chars: int = 200_000) -> str:
     if not path.exists():
         return ""
     text = path.read_text(encoding="utf-8", errors="replace")
     return text[:max_chars]
+
 
 def read_jsonl(path: Path, max_lines: int = 50_000) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
@@ -46,6 +49,7 @@ def read_jsonl(path: Path, max_lines: int = 50_000) -> List[Dict[str, Any]]:
                 continue
     return rows
 
+
 def safe_get(obj: Any, path: List[Any], default=None):
     cur = obj
     for key in path:
@@ -59,6 +63,7 @@ def safe_get(obj: Any, path: List[Any], default=None):
             cur = cur[key]
     return cur
 
+
 def ensure_path(prompt: str) -> Path:
     while True:
         s = input(prompt).strip()
@@ -67,12 +72,13 @@ def ensure_path(prompt: str) -> Path:
             return p
         print(f"Path not found: {p}")
 
+
 def find_appworld_root_from_experiment_dir(experiment_dir: Path) -> Path:
     """
     Walk upward until we find a directory containing:
       - experiments/outputs
       - data
-    That’s a good heuristic for APPWORLD_ROOT in your layout.
+    -> APPWORLD_ROOT 
     """
     cur = experiment_dir.resolve()
     for _ in range(20):
@@ -83,6 +89,7 @@ def find_appworld_root_from_experiment_dir(experiment_dir: Path) -> Path:
         "Could not infer APPWORLD_ROOT. Expected a parent directory containing both "
         "'experiments/outputs' and 'data'."
     )
+
 
 def infer_experiment_name(appworld_root: Path, experiment_dir: Path) -> str:
     """
@@ -99,10 +106,14 @@ def infer_experiment_name(appworld_root: Path, experiment_dir: Path) -> str:
         )
     return str(rel).replace("\\", "/")
 
-def run_appworld_evaluate_full(appworld_root: Path, experiment_name: str, dataset_name: str) -> None:
+
+def run_appworld_evaluate_full(
+    appworld_root: Path, experiment_name: str, dataset_name: str
+) -> None:
     cmd = ["appworld", "evaluate", experiment_name, dataset_name]
     print(f"\nRunning: {' '.join(cmd)} (cwd={appworld_root})\n")
     subprocess.run(cmd, cwd=str(appworld_root), check=True)
+
 
 def run_appworld_evaluate_present_tasks(
     appworld_root: Path,
@@ -124,10 +135,13 @@ def run_appworld_evaluate_present_tasks(
 
     for i, task_id in enumerate(task_ids, start=1):
         cmd = ["appworld", "evaluate", experiment_name, "--task-id", task_id]
-        print(f"\n[{i}/{len(task_ids)}] Running: {' '.join(cmd)} (cwd={appworld_root})\n")
+        print(
+            f"\n[{i}/{len(task_ids)}] Running: {' '.join(cmd)} (cwd={appworld_root})\n"
+        )
         subprocess.run(cmd, cwd=str(appworld_root), check=True)
 
     return task_ids
+
 
 def load_evaluations_full(experiment_dir: Path, dataset_name: str) -> Dict[str, Any]:
     eval_json = experiment_dir / "evaluations" / f"{dataset_name}.json"
@@ -135,7 +149,10 @@ def load_evaluations_full(experiment_dir: Path, dataset_name: str) -> Dict[str, 
         raise FileNotFoundError(f"Expected evaluation json at: {eval_json}")
     return read_json(eval_json)
 
-def load_evaluations_present(experiment_dir: Path, task_ids: List[str]) -> Dict[str, Any]:
+
+def load_evaluations_present(
+    experiment_dir: Path, task_ids: List[str]
+) -> Dict[str, Any]:
     """
     Merge evaluations/on_only_<task_id>.json into a dataset-like dict:
       {"aggregate": {...best-effort...}, "individual": {task_id: {...}}}
@@ -169,10 +186,13 @@ def load_evaluations_present(experiment_dir: Path, task_ids: List[str]) -> Dict[
     }
     return merged
 
-def extract_transcript_from_lm_calls(lm_calls_rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+
+def extract_transcript_from_lm_calls(
+    lm_calls_rows: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
     """
     Produces a simple list of {role, content} messages.
-    It uses the structure you showed: row["input"]["messages"] and row["output"]["choices"][0]["message"].
+    It uses the structure: row["input"]["messages"] and row["output"]["choices"][0]["message"].
     Drops 'reasoning' and 'reasoning_content' by only keeping role/content.
     """
     transcript: List[Dict[str, str]] = []
@@ -199,7 +219,10 @@ def extract_transcript_from_lm_calls(lm_calls_rows: List[Dict[str, Any]]) -> Lis
 
     return transcript
 
-def summarize_transcript(transcript: List[Dict[str, str]], max_chars: int = 60_000) -> str:
+
+def summarize_transcript(
+    transcript: List[Dict[str, str]], max_chars: int = 60_000
+) -> str:
     """
     Convert transcript to a readable string, truncated.
     """
@@ -264,6 +287,7 @@ FAILURE_SCHEMA: Dict[str, Any] = {
     },
 }
 
+
 def classify_failure_gpt4o(
     client: OpenAI,
     task_id: str,
@@ -294,14 +318,14 @@ Focus on the primary failure reason and give concrete evidence lines/snippets.
 """
 
     resp = client.responses.create(
-        model="gpt-4o-mini", # supporting models listed at https://platform.openai.com/settings/organization/limits
+        model="gpt-4o-mini",  # supporting models listed at https://platform.openai.com/settings/organization/limits
         input=prompt,
         text={
             "format": {
                 "type": "json_schema",
-                "name": FAILURE_SCHEMA["name"],    
+                "name": FAILURE_SCHEMA["name"],
                 "strict": True,
-                "schema": FAILURE_SCHEMA["schema"], 
+                "schema": FAILURE_SCHEMA["schema"],
             }
         },
     )
@@ -313,6 +337,7 @@ Focus on the primary failure reason and give concrete evidence lines/snippets.
 # -------------------------
 # Main pipeline
 # -------------------------
+
 
 def analyze_experiment(
     experiment_dir: Path,
@@ -344,7 +369,11 @@ def analyze_experiment(
         # If we didn't run eval now, still infer task_ids from disk
         if not task_ids_present:
             tasks_dir = experiment_dir / "tasks"
-            task_ids_present = sorted([p.name for p in tasks_dir.iterdir() if p.is_dir()]) if tasks_dir.exists() else []
+            task_ids_present = (
+                sorted([p.name for p in tasks_dir.iterdir() if p.is_dir()])
+                if tasks_dir.exists()
+                else []
+            )
         evaluation = load_evaluations_present(experiment_dir, task_ids_present)
 
     individual = evaluation.get("individual", {})
@@ -394,7 +423,10 @@ def analyze_experiment(
                 "primary_category": "other",
                 "secondary_categories": ["missing_logs"],
                 "root_cause": "Could not find usable lm_calls.jsonl/environment_io.md for this task.",
-                "evidence": [f"Missing or empty: {lm_calls_path}", f"Missing or empty: {env_io_path}"],
+                "evidence": [
+                    f"Missing or empty: {lm_calls_path}",
+                    f"Missing or empty: {env_io_path}",
+                ],
                 "suggested_fix": "Ensure the agent run writes lm_calls.jsonl and environment_io.md into tasks/<task_id>/logs/.",
                 "confidence": 0.3,
             }
@@ -407,33 +439,44 @@ def analyze_experiment(
                 env_io_text=env_io_text,
             )
 
-        results["failures"].append({
-            "task_id": task_id,
-            "evaluation": task_entry,
-            "classification": classification,
-            "logs_dir": str(logs_dir),
-        })
+        results["failures"].append(
+            {
+                "task_id": task_id,
+                "evaluation": task_entry,
+                "classification": classification,
+                "logs_dir": str(logs_dir),
+            }
+        )
 
     out_path = experiment_dir / f"failure_analysis_{dataset_name}_{eval_mode}.json"
     out_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"\nWrote: {out_path}\n")
     return out_path
 
+
 def main():
     print("\n=== AppWorld Failure Analyzer ===\n")
-    exp_dir = ensure_path("Enter FULL path to the experiment directory (contains tasks/, evaluations/):\n> ")
+    exp_dir = ensure_path(
+        "Enter FULL path to the experiment directory (contains tasks/, evaluations/):\n> "
+    )
     dataset = input("Enter dataset name (e.g., test_normal):\n> ").strip()
     if not dataset:
         raise ValueError("dataset_name is required.")
 
-    mode = input("Evaluation mode: 'present' (only tasks on disk) or 'full' (entire dataset)? [present/full]:\n> ").strip().lower()
+    mode = (
+        input(
+            "Evaluation mode: 'present' (only tasks on disk) or 'full' (entire dataset)? [present/full]:\n> "
+        )
+        .strip()
+        .lower()
+    )
     if mode not in ("present", "full", ""):
         raise ValueError("mode must be 'present' or 'full'")
     if mode == "":
         mode = "present"
 
     run_eval_str = input("Run `appworld evaluate` now? [Y/n]:\n> ").strip().lower()
-    run_eval = (run_eval_str != "n")
+    run_eval = run_eval_str != "n"
 
     analyze_experiment(exp_dir, dataset_name=dataset, run_eval=run_eval, eval_mode=mode)
 

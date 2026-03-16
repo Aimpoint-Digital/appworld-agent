@@ -13,26 +13,38 @@ load_dotenv(find_dotenv())
 # -------------------------
 
 ENABLE_CONTEXT_SUMMARY = os.getenv("ENABLE_CONTEXT_SUMMARY", "0") == "1"
-SUMMARY_CHAR_THRESHOLD = int(os.getenv("SUMMARY_CHAR_THRESHOLD", "24000"))  # raw chars across all message content
-SUMMARY_TOKEN_THRESHOLD = int(os.getenv("SUMMARY_TOKEN_THRESHOLD", "6000"))  # approximate tokens
-KEEP_LAST_K = int(os.getenv("SUMMARY_KEEP_LAST_K", "6"))  # keep last K messages verbatim
-SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "Qwen/Qwen3-8B-AWQ")  
+SUMMARY_CHAR_THRESHOLD = int(
+    os.getenv("SUMMARY_CHAR_THRESHOLD", "24000")
+)  # raw chars across all message content
+SUMMARY_TOKEN_THRESHOLD = int(
+    os.getenv("SUMMARY_TOKEN_THRESHOLD", "6000")
+)  # approximate tokens
+KEEP_LAST_K = int(
+    os.getenv("SUMMARY_KEEP_LAST_K", "6")
+)  # keep last K messages verbatim
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "Qwen/Qwen3-8B-AWQ")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-SUMMARY_VLLM_BASE_URL = os.getenv("SUMMARY_VLLM_BASE_URL", os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001"))
+SUMMARY_VLLM_BASE_URL = os.getenv(
+    "SUMMARY_VLLM_BASE_URL", os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001")
+)
 SUMMARY_VLLM_CHAT_URL = f"{SUMMARY_VLLM_BASE_URL}/v1/chat/completions"
-SUMMARY_VLLM_API_KEY = os.getenv("SUMMARY_VLLM_API_KEY", "")  # optional; usually EMPTY in AppWorld proxy
+SUMMARY_VLLM_API_KEY = os.getenv(
+    "SUMMARY_VLLM_API_KEY", ""
+)  # optional; usually EMPTY in AppWorld proxy
 VLLM_CONTEXT_LEN = int(os.getenv("VLLM_CONTEXT_LEN", "12000"))
 MIN_COMPLETION_TOKENS = int(os.getenv("MIN_COMPLETION_TOKENS", "256"))
 DEFAULT_COMPLETION_TOKENS = int(os.getenv("DEFAULT_COMPLETION_TOKENS", "1024"))
-KEEP_FIRST_N = int(os.getenv("SUMMARY_KEEP_FIRST_N", "26")) # chosen based on react prompt template
-
+KEEP_FIRST_N = int(
+    os.getenv("SUMMARY_KEEP_FIRST_N", "26")
+)  # chosen based on react prompt template
 
 
 def approx_prompt_tokens_from_messages(messages: List[Dict[str, Any]]) -> int:
     # reuse your existing approximation
     total_chars, approx_toks = payload_size(messages)
     return approx_toks
+
 
 def clamp_max_tokens_for_vllm(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -60,6 +72,7 @@ def clamp_max_tokens_for_vllm(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload.pop("max_completion_tokens", None)  # optional: avoid ambiguity
     return payload
 
+
 def approx_tokens_from_text(s: str) -> int:
     """
     Cheap token approximation. Typically ~4 chars/token in English-ish text,
@@ -69,6 +82,7 @@ def approx_tokens_from_text(s: str) -> int:
         return 0
     return math.ceil(len(s) / 4)
 
+
 def payload_size(messages: List[Dict[str, Any]]) -> Tuple[int, int]:
     """Return (total_chars, approx_tokens) for message contents."""
     total_chars = 0
@@ -76,9 +90,20 @@ def payload_size(messages: List[Dict[str, Any]]) -> Tuple[int, int]:
         c = m.get("content")
         if isinstance(c, str):
             total_chars += len(c)
-    return total_chars, approx_tokens_from_text("".join([(m.get("content") or "") for m in messages if isinstance(m.get("content"), str)]))
+    return total_chars, approx_tokens_from_text(
+        "".join(
+            [
+                (m.get("content") or "")
+                for m in messages
+                if isinstance(m.get("content"), str)
+            ]
+        )
+    )
 
-def find_system_and_first_user(messages: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+
+def find_system_and_first_user(
+    messages: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
     """
     Returns:
       - system_message (if exists)
@@ -97,16 +122,19 @@ def find_system_and_first_user(messages: List[Dict[str, Any]]) -> Tuple[Optional
 
     return system_msg, first_user_idx
 
+
 _VLLM_CTX_RE = re.compile(
     r"maximum context length is (\d+) tokens and your request has (\d+) input tokens.*?max_tokens.*?:\s*(\d+)",
     re.IGNORECASE | re.DOTALL,
 )
+
 
 def build_vllm_payload(req) -> Dict[str, Any]:
     """
     Keep this simple. Summarization should happen in an async step before the POST.
     """
     return req.model_dump(exclude_none=True)
+
 
 def _parse_vllm_ctx_error(text: str) -> Optional[Tuple[int, int, int]]:
     if not text:
@@ -116,6 +144,7 @@ def _parse_vllm_ctx_error(text: str) -> Optional[Tuple[int, int, int]]:
         return None
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
+
 def _render_msg(m: Dict[str, Any], clip: int) -> str:
     role = m.get("role", "unknown")
     content = m.get("content", "")
@@ -124,6 +153,7 @@ def _render_msg(m: Dict[str, Any], clip: int) -> str:
     if clip is not None and len(content) > clip:
         content = content[:clip] + "\n...[truncated]..."
     return f"{role.upper()}:\n{content}"
+
 
 async def summarize_messages_with_vllm(
     *,
@@ -159,13 +189,14 @@ async def summarize_messages_with_vllm(
     async with httpx.AsyncClient(timeout=timeout) as client:
         for clip in clip_sizes:
             for cap in msg_caps:
-                mids = middle_messages[-cap:] if len(middle_messages) > cap else middle_messages
+                mids = (
+                    middle_messages[-cap:]
+                    if len(middle_messages) > cap
+                    else middle_messages
+                )
                 middle_blob = "\n\n".join(_render_msg(m, clip) for m in mids)
 
-                user = (
-                    "Conversation segment to summarize:\n"
-                    f"{middle_blob}\n"
-                )
+                user = "Conversation segment to summarize:\n" f"{middle_blob}\n"
 
                 for mt in max_tokens_try:
                     payload = {
@@ -179,7 +210,9 @@ async def summarize_messages_with_vllm(
                         "stream": False,
                     }
 
-                    r = await client.post(SUMMARY_VLLM_CHAT_URL, json=payload, headers=headers)
+                    r = await client.post(
+                        SUMMARY_VLLM_CHAT_URL, json=payload, headers=headers
+                    )
 
                     if r.status_code == 200:
                         data = r.json()
@@ -220,7 +253,11 @@ async def maybe_summarize_payload(
         return clamp_max_tokens_for_vllm(payload)
 
     total_chars, approx_toks = payload_size(messages)
-    if not force and total_chars < SUMMARY_CHAR_THRESHOLD and approx_toks < SUMMARY_TOKEN_THRESHOLD:
+    if (
+        not force
+        and total_chars < SUMMARY_CHAR_THRESHOLD
+        and approx_toks < SUMMARY_TOKEN_THRESHOLD
+    ):
         return clamp_max_tokens_for_vllm(payload)
 
     n = max(1, KEEP_FIRST_N)
@@ -228,7 +265,9 @@ async def maybe_summarize_payload(
 
     # Optional: "pin" a system message at the front even if N doesn't include it.
     pinned_system: Optional[Dict[str, Any]] = None
-    if messages and messages[0].get("role") == "system": # this wont exist for react tempalte in appworld
+    if (
+        messages and messages[0].get("role") == "system"
+    ):  # this wont exist for react tempalte in appworld
         pinned_system = messages[0]
 
     # Build first/last windows (excluding pinned system from window math if you want)
@@ -242,13 +281,11 @@ async def maybe_summarize_payload(
     first = core[:n]
     last = core[-k:]
 
-    middle = core[n:len(core) - k]
+    middle = core[n : len(core) - k]
     if len(middle) < 2:
         return clamp_max_tokens_for_vllm(payload)
 
-    summary_text = await summarize_messages_with_vllm(
-        middle_messages=middle
-    )
+    summary_text = await summarize_messages_with_vllm(middle_messages=middle)
 
     new_messages: List[Dict[str, Any]] = []
     if pinned_system is not None:

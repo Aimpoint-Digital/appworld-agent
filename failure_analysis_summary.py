@@ -2,7 +2,9 @@ import json
 from collections import Counter, defaultdict
 import numpy as np
 
-filepath = input("Please enter filepath of the full analysis summary json from extract_failure_modes:\n> ").strip()
+filepath = input(
+    "Please enter filepath of the full analysis summary json from extract_failure_modes:\n> "
+).strip()
 
 # Load results
 with open(filepath) as f:
@@ -14,9 +16,7 @@ failures = data["failures"]
 # 1) Primary category counts
 # -------------------------
 primary_counts = Counter(
-    f["classification"]["primary_category"]
-    for f in failures
-    if f.get("classification")
+    f["classification"]["primary_category"] for f in failures if f.get("classification")
 )
 
 print("\nPrimary failure categories:")

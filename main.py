@@ -13,7 +13,15 @@ from dotenv import load_dotenv, find_dotenv
 
 from appworld import AppWorld
 from summary_module import maybe_summarize_payload
-from utils.helpers import code_extractor, extract_api_calls, _strip_think_tags, _extract_patch_from_curated,_count_consecutive_no_code_assistant_msgs, _extract_failed_app_from_error , _build_api_docs_context
+from utils.helpers import (
+    code_extractor,
+    extract_api_calls,
+    _strip_think_tags,
+    _extract_patch_from_curated,
+    _count_consecutive_no_code_assistant_msgs,
+    _extract_failed_app_from_error,
+    _build_api_docs_context,
+)
 from state_registry import StateRegistry, CAPTURE_SUFFIX
 
 load_dotenv(find_dotenv())
@@ -83,6 +91,7 @@ class ChatCompletionRequest(BaseModel):
     """
     appworld may pass through some fields i dont need to edit here, so just pass through
     """
+
     model_config = ConfigDict(extra="allow")
 
     model: str
@@ -111,6 +120,7 @@ def looks_like_error(world_out: Any) -> bool:
         return False
     return any(re.search(p, world_out, flags=re.MULTILINE) for p in ERROR_PATTERNS)
 
+
 # NOTE: could try to force a code response after pondering, rather than possibly only returning reasoning content
 async def get_fix_suggestion_from_vllm(
     task_id: Optional[str],
@@ -118,60 +128,56 @@ async def get_fix_suggestion_from_vllm(
     world_out: str,
     api_docs_text: str = "",
     model: str = VLLM_MODEL,
-    state_context: str = ""
+    state_context: str = "",
 ) -> str:
     messages = [
         {
-          "role": "system",
-          "content": (
-              "You are debugging Python code executed inside AppWorld.\n"
-              "Your job is to produce a SHORT, ACTIONABLE intervention that the agent can use immediately.\n"
-              "Do NOT ask questions. Do NOT use input(). Do NOT invent tool outputs or facts.\n"
-              "You MUST base corrections on the provided API docs text when available.\n\n"
-              "You MUST use the provided variable state when available — do NOT re-derive values that already exist.\n"
-
-              "Classify the failure using ONE primary category from this list:\n"
-              "- missing_api_call_or_wrong_api_name\n"
-              "- wrong_api_parameters_or_schema_mismatch\n"
-              "- pagination_or_incomplete_iteration\n"
-              "- auth_or_credentials_issue\n"
-              "- reasoning_or_planning_error\n"
-              "- repetition_or_loop\n"
-              "- tooling_runtime_error\n"
-              "- formatting_or_code_block_error\n"
-              "- other\n\n"
-
-              "Output format (exact):\n"
-              "PRIMARY_CATEGORY: <one from list>\n"
-              "EVIDENCE: <1-3 short quotes from the execution output>\n"
-              "DIAGNOSIS: <1-2 sentences>\n"
-              "FIX_STEPS:\n"
-              "- <2-6 concrete bullet steps>\n"
-              "PATCH:\n"
-              "```python\n"
-              "<corrected code>\n"
-              "```\n\n"
-
-              "PATCH RULES (strict):\n"
-              "- PATCH IS REQUIRED. Never output PATCH: (omitted).\n"
-              "- PATCH must contain ONLY a single fenced python code block (no prose before/after).\n"
-              "- The code MUST be directly executable in AppWorld.\n"
-              "- The code MUST perform at least one AppWorld API call (e.g., apis.<app>.<api>(...)).\n"
-              "- If the fix is uncertain, still output a minimal executable patch that gathers the missing info via API docs,\n"
-              "  e.g. print(apis.api_docs.show_api_doc(app_name=..., api_name=...)) and then returns/prints what to do next.\n"
-              # "- If the failure relates to task completion, the patch MUST call apis.supervisor.complete_task(...) when appropriate.\n"
-              "- NEVER call apis.supervisor.complete_task() in your patch. "
-              "- NEVER call apis.supervisor.complete_task() in your patch. "
-              "  The patch should fix the immediate error, not complete the task. "
-              "  Task completion happens only after all steps succeed.\n"
-              "- When using API calls, match parameter names exactly as shown in the provided API docs.\n\n"
-              "- REUSE existing variables from the VARIABLES section below — do NOT re-login or re-fetch values that are already available.\n"
-
-              "Before responding, verify:\n"
-              "- Output matches the exact format.\n"
-              "- PATCH exists and is a single ```python fenced block.\n"
-              "- PATCH includes at least one apis.* call.\n"
-          ),
+            "role": "system",
+            "content": (
+                "You are debugging Python code executed inside AppWorld.\n"
+                "Your job is to produce a SHORT, ACTIONABLE intervention that the agent can use immediately.\n"
+                "Do NOT ask questions. Do NOT use input(). Do NOT invent tool outputs or facts.\n"
+                "You MUST base corrections on the provided API docs text when available.\n\n"
+                "You MUST use the provided variable state when available — do NOT re-derive values that already exist.\n"
+                "Classify the failure using ONE primary category from this list:\n"
+                "- missing_api_call_or_wrong_api_name\n"
+                "- wrong_api_parameters_or_schema_mismatch\n"
+                "- pagination_or_incomplete_iteration\n"
+                "- auth_or_credentials_issue\n"
+                "- reasoning_or_planning_error\n"
+                "- repetition_or_loop\n"
+                "- tooling_runtime_error\n"
+                "- formatting_or_code_block_error\n"
+                "- other\n\n"
+                "Output format (exact):\n"
+                "PRIMARY_CATEGORY: <one from list>\n"
+                "EVIDENCE: <1-3 short quotes from the execution output>\n"
+                "DIAGNOSIS: <1-2 sentences>\n"
+                "FIX_STEPS:\n"
+                "- <2-6 concrete bullet steps>\n"
+                "PATCH:\n"
+                "```python\n"
+                "<corrected code>\n"
+                "```\n\n"
+                "PATCH RULES (strict):\n"
+                "- PATCH IS REQUIRED. Never output PATCH: (omitted).\n"
+                "- PATCH must contain ONLY a single fenced python code block (no prose before/after).\n"
+                "- The code MUST be directly executable in AppWorld.\n"
+                "- The code MUST perform at least one AppWorld API call (e.g., apis.<app>.<api>(...)).\n"
+                "- If the fix is uncertain, still output a minimal executable patch that gathers the missing info via API docs,\n"
+                "  e.g. print(apis.api_docs.show_api_doc(app_name=..., api_name=...)) and then returns/prints what to do next.\n"
+                # "- If the failure relates to task completion, the patch MUST call apis.supervisor.complete_task(...) when appropriate.\n"
+                "- NEVER call apis.supervisor.complete_task() in your patch. "
+                "- NEVER call apis.supervisor.complete_task() in your patch. "
+                "  The patch should fix the immediate error, not complete the task. "
+                "  Task completion happens only after all steps succeed.\n"
+                "- When using API calls, match parameter names exactly as shown in the provided API docs.\n\n"
+                "- REUSE existing variables from the VARIABLES section below — do NOT re-login or re-fetch values that are already available.\n"
+                "Before responding, verify:\n"
+                "- Output matches the exact format.\n"
+                "- PATCH exists and is a single ```python fenced block.\n"
+                "- PATCH includes at least one apis.* call.\n"
+            ),
         },
         {
             "role": "user",
@@ -186,12 +192,13 @@ async def get_fix_suggestion_from_vllm(
                 + (
                     "Relevant API documentation (authoritative):\n"
                     f"```json\n{api_docs_text}\n```\n\n"
-                    if api_docs_text else ""
+                    if api_docs_text
+                    else ""
                 )
                 + "IMPORTANT: Any fixes must match the API docs exactly "
-                  "(argument names, types, and required fields).\n"
+                "(argument names, types, and required fields).\n"
             ),
-        }
+        },
     ]
 
     payload: Dict[str, Any] = {
@@ -253,7 +260,6 @@ async def post_process_assistant_message(
             # Registry for tracking key vars
             registry = StateRegistry()
 
-
             # Replay history
             for m in history:
                 if m.get("role") != "assistant":
@@ -279,11 +285,11 @@ async def post_process_assistant_message(
             # --- NO-CODE LOOP BREAKER ---
             if not new_code:
                 consecutive = _count_consecutive_no_code_assistant_msgs(history)
-                
+
                 if consecutive >= 2:
                     # Model is stuck in prose loop — inject API discovery
                     api_docs_text = _build_api_docs_context(world, new_code=None)
-                    
+
                     curated = await get_fix_suggestion_from_vllm(
                         task_id=task_id,
                         code="# (model produced no executable code)",
@@ -295,7 +301,7 @@ async def post_process_assistant_message(
                         api_docs_text=api_docs_text,
                         state_context=registry.format_for_prompt(),
                     )
-                    
+
                     patch_code = _extract_patch_from_curated(curated or "")
                     if patch_code:
                         assistant_message["content"] = f"```python\n{patch_code}\n```"
@@ -306,12 +312,15 @@ async def post_process_assistant_message(
                             "print(apis.api_docs.show_app_descriptions())\n"
                             "```"
                         )
-                    
-                    log_event("intervention.no_code_loop_break",
-                              request_id=request_id, task_id=task_id,
-                              consecutive_no_code=consecutive + 1)
+
+                    log_event(
+                        "intervention.no_code_loop_break",
+                        request_id=request_id,
+                        task_id=task_id,
+                        consecutive_no_code=consecutive + 1,
+                    )
                     return assistant_message
-                
+
                 # First time no code — let it pass, might be planning
                 return assistant_message
 
@@ -361,13 +370,15 @@ async def post_process_assistant_message(
                             "```"
                         )
 
-                log_event("intervention.curated", request_id=request_id,
-                          task_id=task_id,
-                          curated_preview=(curated or "")[:800],
-                          patch_extracted=bool(patch_code))
+                log_event(
+                    "intervention.curated",
+                    request_id=request_id,
+                    task_id=task_id,
+                    curated_preview=(curated or "")[:800],
+                    patch_extracted=bool(patch_code),
+                )
             else:
                 assistant_message["content"] = content
-
 
     except Exception as e:
         # If replay/execution itself crashed outside AppWorld's string errors
@@ -378,7 +389,9 @@ async def post_process_assistant_message(
             error=str(e),
         )
         # Let it fall through: we’ll just return original assistant message
-        raise Exception(f"[post_process_assistant_message] Error during World execution: {e}")
+        raise Exception(
+            f"[post_process_assistant_message] Error during World execution: {e}"
+        )
 
     log_event(
         "intervention.execution_result",
@@ -405,7 +418,9 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     request_id = uuid.uuid4().hex[:12]
 
     if req.stream:
-        raise HTTPException(status_code=400, detail="Streaming not supported by this proxy yet.")
+        raise HTTPException(
+            status_code=400, detail="Streaming not supported by this proxy yet."
+        )
 
     task_id = extract_task_id(req)
     payload = build_vllm_payload(req)
@@ -419,12 +434,18 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         model=req.model,
         n_messages=len(req.messages),
         client_host=getattr(request.client, "host", None),
-        last_user_preview=(req.messages[-1].content[:300] if req.messages and req.messages[-1].content else None),
+        last_user_preview=(
+            req.messages[-1].content[:300]
+            if req.messages and req.messages[-1].content
+            else None
+        ),
     )
 
     timeout = httpx.Timeout(120.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(VLLM_CHAT_URL, json=payload, headers={"Authorization": "Bearer EMPTY"})
+        r = await client.post(
+            VLLM_CHAT_URL, json=payload, headers={"Authorization": "Bearer EMPTY"}
+        )
 
     log_event(
         "vllm.raw_response",

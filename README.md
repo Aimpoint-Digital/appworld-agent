@@ -1,417 +1,249 @@
 # appworld-agent
 
-Utilities + workflows for running **AppWorld** evaluations on small/target models (starting with **Qwen/Qwen3-8B via vLLM**) and analyzing failures (logs → LLM categorization → JSON report). Also includes a **FastAPI proxy** that can inject “interventions” like replaying code in AppWorld and generating “fix suggestions”.
+Code for the paper: **"Inference-Time Scaffolding for Small Language Model Agents: Doubling AppWorld Performance Without Additional Training"**
 
-## Goals
-
-* Run AppWorld benchmark on target SLM (**Qwen/Qwen3-8B**), with a local vllm session and fastapi proxy session, separate from running appworld session
-* Generate evaluation reports (`evaluations/<dataset>.json`).
-* For failed tasks: collect logs + transcripts and classify failure modes with an external LLM (e.g. GPT-4o).
-* Track deltas across interventions:
-
-  * truncation + repl
-  * repl only
-  * truncation only
-* Compare successful runs vs failures and quantify category reduction.
+This repo implements a three-tier inference scaffolding pipeline that deploys the same frozen Qwen3-8B model in three roles to improve performance on the [AppWorld benchmark](https://github.com/stonybrooknlp/appworld) without any additional training.
 
 ---
 
-## Repo Layout (expected)
+## How the Code Maps to the Paper
 
-This repo assumes:
+| File | Paper Role |
+|------|-----------|
+| `main.py` | FastAPI proxy implementing the correction module (Tier 3) — intercepts agent actions, checks for errors, generates fixes using isolated re-invocation of the model |
+| `summary_module.py` | Summarization module (Tier 2) — compresses conversation history when context exceeds thresholds, preserving credentials, API schemas, and error patterns |
+| `extract_failure_modes.py` | Failure mode taxonomy pipeline — sends failed task transcripts to GPT-4o for structured classification into the categories reported in Table 3 |
+| `failure_analysis_summary.py` | Aggregates classification results into summary statistics |
+| `utils/helpers.py` | Shared utilities (code extraction, error detection, API doc retrieval) |
 
-* You run experiments in **AppWorld checkout** (Aimpoint fork). Our fork makes edits to appworld source code which are critical for repo to run. 
-* Output ends up under:
-
-  ```
-  APPWORLD_ROOT/experiments/outputs/<experiment_name>/...
-  ```
-
-Common output paths:
-
-```
-experiments/outputs/<experiment_name>/tasks/<task_id>/logs/
-experiments/outputs/<experiment_name>/evaluations/<dataset>.json
-```
+> **Note:** `state_registry.py` is an experimental credential manager that was not included in the final paper results. It can be ignored.
 
 ---
 
-## Prerequisites
+## Prerequisites: Two Repos Required
 
-### EC2 / Server assumptions
+This repo works alongside a patched fork of AppWorld. You need both:
 
-* Ubuntu EC2
-* `tmux` used for long-running vLLM / eval runs
-* vLLM serving Qwen3-8B locally
-* Python venv(s) (example: `appenv`, `vllmenv`)
+1. **This repo** — `Aimpoint-Digital/appworld-agent`
+2. **Aimpoint AppWorld fork** — `Aimpoint-Digital/appworld`
 
-### Environment variables
+> ⚠️ Do **not** install AppWorld from the upstream repo. The Aimpoint fork contains critical patches required for this pipeline to function.
 
-* For AppWorld + vLLM proxy runs:
+### What the fork patches
 
-  * `OPENAI_API_KEY=EMPTY` (AppWorld expects it; proxy/vLLM uses Bearer EMPTY)
-* For failure-mode classification with OpenAI:
-
-  * `OPENAI_API_KEY=<real key>` (in the environment where classifier runs)
-
----
-
-## 1) Use the Aimpoint Digital AppWorld fork
-
-You **must** run with the Aimpoint fork because we patched the agent plumbing:
-
-* Fix reasoning extraction / parsing in the ReAct code agent
-* Pass **task id** through the OpenAI-compatible request `user` field so the proxy can recover it
-
-NOTE: do not install appworld directly as stated in their readme instructions. you must run pip install -e . to install the fork. then run appworld install --repo, and then download the data. 
-
-### Clone + checkout
-
-```bash
-git clone <AIMPOINT_APPWORLD_FORK_URL> appworld_source
-cd appworld_source
-git checkout <branch-with-agent-fixes>
-```
-
-> If you already have upstream AppWorld cloned, add the fork as a remote and checkout the fork branch:
-
-```bash
-git remote add aimpoint <AIMPOINT_APPWORLD_FORK_URL>
-git fetch aimpoint
-git checkout -b aimpoint-fork aimpoint/<branch>
-```
-
-### What changed in the fork (high level)
-
-* ReAct code agent was modified to:
-
-  * correctly extract / handle “reasoning” artifacts
-  * set `user="<task_id>"` in requests sent to the model server (OpenAI chat completions format, edit in next_execution_inputs_usage_and_status)
-
-This is critical because our proxy extracts task id via:
+- Fixes reasoning extraction and parsing in the `simplified_react_code_agent`
+- Propagates `task_id` through the OpenAI-compatible `user` field in each request, so the proxy can associate model calls with tasks:
 
 ```python
 def extract_task_id(req: ChatCompletionRequest) -> Optional[str]:
     return req.user or None
 ```
 
+Without this patch, the correction proxy cannot identify which task is running and will skip all interventions.
+
 ---
 
-## 2) Start vLLM server (Qwen/Qwen3-8B)
+## Environment Setup
 
-Example command used on EC2:
+You need **three separate virtual environments** to avoid dependency conflicts:
+
+| Env | Purpose | Install from |
+|-----|---------|-------------|
+| `appenv` | AppWorld benchmark runner | Aimpoint AppWorld fork |
+| `vllmenv` | vLLM model server | `pip install vllm` |
+| `proxyenv` | This repo (FastAPI proxy + analysis scripts) | `requirements.txt` |
+
+### 1. Set up AppWorld (appenv)
 
 ```bash
-# In tmux
-source ~/vllm_env/bin/activate  # or your env
-vllm serve Qwen/Qwen3-8B \
-  --reasoning-parser qwen3 \
-  --max-model-len 6384 \
-  --gpu-memory-utilization 0.9 \
-  --max-num-seqs 16
+git clone <AIMPOINT_APPWORLD_FORK_URL> appworld_source
+cd appworld_source
+
+python -m venv ~/appenv
+source ~/appenv/bin/activate
+
+pip install -U "click==8.1.7"   # required before data download
+pip install -e .                 # install fork, not upstream
+appworld install --repo
+appworld download data
 ```
 
-Notes:
+Set the AppWorld root (required after every reboot):
 
-* The reasoning parser matters for Qwen3-style outputs.
-* Keep max length conservative to avoid OOM.
+```bash
+export APPWORLD_ROOT=/path/to/appworld_source/appworld
+```
+
+### 2. Set up vLLM (vllmenv)
+
+```bash
+python -m venv ~/vllmenv
+source ~/vllmenv/bin/activate
+pip install vllm
+```
+
+### 3. Set up this repo (proxyenv)
+
+```bash
+git clone <AIMPOINT_APPWORLD_AGENT_URL> appworld-agent
+cd appworld-agent
+
+python -m venv ~/proxyenv
+source ~/proxyenv/bin/activate
+pip install -r requirements.txt
+```
 
 ---
 
-## 3) Install AppWorld + dataset
+## Model Configuration
 
-Inside your AppWorld venv:
+AppWorld resolves models by name from a registry file. Add the following entry to:
+
+```
+appworld_source/appworld/experiments/configs/_generator/models/vllm_local.py
+```
+
+```python
+MODEL_INFOS = [
+    {
+        "model_name": "vllm-local-8000-qwen3-8b",
+        "client_name": "openai",
+        "model_id": "Qwen/Qwen3-8B",          # must match what vLLM is serving
+        "model_kwargs": {
+            "api_type": "chat_completions",
+            "temperature": 0,
+            "seed": 100,
+            "api_key_env_name": "NO_API_KEY",
+            "base_url": "http://127.0.0.1:8000/v1",   # point to proxy or vLLM directly
+            "max_completion_tokens": 3000,
+            "tool_parser_name": None,
+            "parallel_tool_calls": True,
+            "cost_per_token": {
+                "input_cache_miss": 0.0,
+                "input_cache_hit": 0.0,
+                "input_cache_write": 0.0,
+                "output": 0.0,
+            },
+        },
+        "function_calling": True,
+        "tool_choice": "auto",
+        "function_calling_demos": False,
+        # Required to handle vLLM tool schema quirks
+        "remove_function_property_keys": [
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "minimum",
+            "maximum",
+        ],
+        "model_server_config": {
+            "enabled": False,    # prevents AppWorld from trying to manage the server
+        },
+        "part_of": ["vn", "vllm"],
+        "provider": "vllm",
+    },
+]
+```
+
+Then generate the jsonnet config:
 
 ```bash
 source ~/appenv/bin/activate
-cd ~/appworld_source  # APPWORLD_ROOT
+cd $APPWORLD_ROOT
 
-pip install -U "click==8.1.7"   # required before data download in our setup
-appworld download data
-```
-
----
-
-## 4) Configure model entry (MODEL_INFOs)
-
-We created a model entry in the AppWorld experiments model registry:
-
-* File: `appworld/experiments/code/models/vllm_local.py`
-* Add a `MODEL_INFOs` entry for something like `vllm-local-8000-qwen3-8b`
-
-This lets AppWorld resolve `--model-name vllm-local-8000-qwen3-8b`.
-
-Also set:
-
-```bash
-export OPENAI_API_KEY=EMPTY
-```
-
----
-
-## 5) Generate config + run experiment
-
-### Generate jsonnet config
-
-```bash
 python experiments/configs/_generator/run.py \
   --model_names vllm-local-8000-qwen3-8b \
   --agent_names simplified_react_code_agent \
   --dataset_names test_normal
 ```
 
-### Run the benchmark
+---
 
-```bash
-appworld run auto \
-  --agent-name simplified_react_code_agent \
-  --model-name vllm-local-8000-qwen3-8b \
-  --dataset-name test_normal
-```
+## Running Experiments
 
-Outputs should appear under something like:
-
-```
-experiments/outputs/simplified_react_code_agent/vllm_local/vllm-local-8000-qwen3-8b/test_normal/tasks/
-```
-
-Example:
-
-```bash
-ls experiments/outputs/simplified_react_code_agent/vllm_local/vllm-local-8000-qwen3-8b/test_normal/tasks
-# 3d9a636_1  3d9a636_2  3d9a636_3  fd1f8fa_1 ...
-```
+The three runs below correspond directly to the ablation study in the paper (Table 4). Each run uses a distinct experiment name to prevent output collisions — AppWorld stores outputs under `experiments/outputs/{experiment_name}/`.
 
 ---
 
-## 6) Evaluate the run
+### Run A — Baseline (direct vLLM, no proxy)
 
-Run evaluation from **APPWORLD_ROOT** (important):
-
-```bash
-cd ~/appworld_source/appworld_source/appworld  # APPWORLD_ROOT
-appworld evaluate simplified_react_code_agent/vllm_local/vllm-local-8000-qwen3-8b/test_normal test_normal
-```
-
-Evaluation outputs:
-
-```
-experiments/outputs/<experiment_name>/evaluations/test_normal.json
-experiments/outputs/<experiment_name>/evaluations/test_normal.txt
-```
-
----
-
-## 7) FastAPI proxy (interventions / replay / fix suggestion)
-
-This repo contains a FastAPI app that proxies OpenAI-style `/v1/chat/completions` to vLLM, and can:
-
-* extract `task_id` from request `user`
-* replay executable code from conversation history into `AppWorld(task_id=..., experiment_name=...)`
-* execute newest assistant code
-* if output looks like an error, call vLLM again to generate a short “fix suggestion”
-* log all interventions as JSON lines to a log file
-
-### How it works
-
-Incoming request resembles:
-
-```json
-{
-  "model": "Qwen/Qwen3-8B",
-  "messages": [{"role": "user", "content": "goodbye"}],
-  "temperature": 0.0,
-  "user": "TASK_123"
-}
-```
-
-The proxy uses:
-
-* `req.user` → task id
-* `code_extractor()` → extract python blocks from assistant content
-* `world.execute(code)` → replay + execute
-* `looks_like_error()` → regex-based error detection
-* calls vLLM to produce a better “fix suggestion” response (optional)
-
-### Run the proxy
-
-Set env vars:
+**1. Start vLLM (FP16)**
 
 ```bash
-export VLLM_BASE_URL=http://127.0.0.1:8001
-export OPENAI_API_KEY=EMPTY
-export PROXY_LOG_PATH=proxy_interventions.log
-```
-
-Run:
-
-```bash
-uvicorn app:app --host 0.0.0.0 --port 8000
-```
-
-Then point AppWorld model endpoint to the proxy (in your MODEL_INFOs / model config). The proxy forwards to vLLM.
-
----
-
-## 8) Failure-mode extraction + classification
-
-After evaluation, we want:
-
-1. Read `evaluations/<dataset>.json`
-2. Collect failed tasks: `individual[task_id].success == false`
-3. For each failed task, gather logs (typically):
-
-   * `tasks/<task_id>/logs/lm_calls.jsonl`
-   * optionally `tasks/<task_id>/logs/environment_io.md`
-4. Send transcript + eval info to an LLM (e.g. GPT-4o)
-5. Save structured classification results into:
-
-   * `failure_analysis_<dataset>.json`
-
-### Output format (example)
-
-* `primary_category`: one main bucket (wrong API, wrong args, loop, etc.)
-* `secondary_categories`: optional
-* `root_cause`: short explanation
-* `evidence`: snippets pointing to where it went wrong
-* `suggested_fix`: concrete fix idea
-* `confidence`: 0–1
-
----
-
-## Common pitfalls
-
-### Running `appworld evaluate` from the wrong directory
-
-Run from `APPWORLD_ROOT`, otherwise it may not find `./data` or may look for outputs in the wrong relative location.
-
-### Missing `user` field propagation
-
-If the agent doesn’t set `user="<task_id>"`, the proxy can’t associate requests with a task and will skip interventions.
-
-### vLLM endpoint mismatch
-
-Make sure `VLLM_BASE_URL` matches where `vllm serve` is listening and the proxy points to `/v1/chat/completions`.
-
----
-
-## Run the Experiment
-
-## 0) One-time setup (per machine / repo)
-
-1. **Activate env + be at AppWorld repo root**
-
-```bash
-cd ~/appworld-source/appworld_source/appworld
-source ../../../../appenv/bin/activate  # adjust if different
-```
-
-2. **Confirm data exists**
-
-```bash
-ls -la ./data/tasks | head
-```
-
-If missing:
-
-```bash
-appworld download data
-```
-
-3. **Start vLLM (Qwen3-8B)**
-
-```bash
+source ~/vllmenv/bin/activate
 tmux new -s vllm
+
 vllm serve Qwen/Qwen3-8B \
   --reasoning-parser qwen3 \
-  --max-model-len 6384 \
-  --gpu-memory-utilization 0.9 \
-  --max-num-seqs 16 \
-  --port 8001
+  --max-model-len 12000 \
+  --gpu-memory-utilization 0.95 \
+  --max-num-seqs 4 \
+  --port 8000
 ```
-
 Detach: `Ctrl-b d`
 
-4. **(If needed) generate configs (you already did, but here’s the canonical)**
+Make sure `base_url` in your MODEL_INFOS points to `http://127.0.0.1:8000/v1`.
+
+**2. Run benchmark**
 
 ```bash
-python experiments/configs/_generator/run.py \
-  --model_names vllm-local-8000-qwen3-8b \
-  --agent_names simplified_react_code_agent \
-  --dataset_names test_normal
-```
+source ~/appenv/bin/activate
+cd $APPWORLD_ROOT
+export OPENAI_API_KEY=EMPTY
 
----
-
-## Run A — Baseline (direct vLLM, no proxy)
-
-1. **Point AppWorld model to vLLM directly**
-
-* Ensure your `MODEL_INFO` (or model config for `vllm-local-8000-qwen3-8b`) uses, jsut make sure the JSONNET file is using the same port the FastaPI/vLLM is running on:
-
-  * `base_url: http://127.0.0.1:8001`
-  * and `Authorization: Bearer EMPTY` 
-
-2. **Run the benchmark**
-
-```bash
 appworld run auto \
   --agent-name simplified_react_code_agent \
   --model-name vllm-local-8000-qwen3-8b \
   --dataset-name test_normal
 ```
 
-3. **Evaluate (from AppWorld repo root)**
+**3. Evaluate** (must run from APPWORLD_ROOT)
 
 ```bash
 appworld evaluate vllm-local-8000-qwen3-8b test_normal
 ```
 
-4. **Classify failures (your script)**
-Make sure openAI token set in environment
+**4. Classify failures**
+
+Requires a real OpenAI API key — uses `gpt-4o-mini` for classification.
 
 ```bash
-python scripts/extract_failure_modes.py \
-  --experiment "vllm-local-8000-qwen3-8b" \
-  --dataset "test_normal" \
-  --out "experiments/outputs/vllm-local-8000-qwen3-8b/analysis/failure_modes.json"
+source ~/proxyenv/bin/activate
+export OPENAI_API_KEY=<your_real_key>
+python extract_failure_modes.py
 ```
+
+The script is interactive. When prompted:
+- **Experiment directory**: full path to the experiment's output dir (contains `tasks/` and `evaluations/`)
+- **Dataset name**: `test_normal`
+- **Evaluation mode**: `full` (scores all 168 tasks) or `present` (only tasks on disk)
+- **Run appworld evaluate now?**: `Y` to run evaluation as part of the script, `n` to skip if already done
+
+Output is written to `failure_analysis_{dataset}_{mode}.json` inside the experiment directory.
 
 ---
 
-## Run B — Proxy ON (post-processing), summarization OFF
+### Run B — Correction Only (proxy ON, summarization OFF)
 
-### What changes?
+**1. Make sure vLLM is running on port 8001** (restart if needed with `--port 8001`)
 
-* AppWorld model base_url now points to **FastAPI proxy** at `http://127.0.0.1:8000`
-* Proxy forwards to vLLM at `http://127.0.0.1:8001` -> make sure vLLM is running on that port using instructions above
-* Proxy env vars:
-
-  * post-processing enabled (your default behavior)
-  * summarization disabled
-
-1. **Start the proxy (port 8000)**
+**2. Start proxy with summarization disabled**
 
 ```bash
-tmux new -s proxy_no_summary
+source ~/proxyenv/bin/activate
+tmux new -s proxy
+
 export VLLM_BASE_URL="http://127.0.0.1:8001"
 export ENABLE_CONTEXT_SUMMARY=0
-export OPENAI_API_KEY=EMPTY   # keep if AppWorld expects it set; summarization is off anyway
-export PROXY_LOG_PATH="proxy_no_summary.log"
-uvicorn path.to.your_proxy_module:app --host 0.0.0.0 --port 8000
-```
+export OPENAI_API_KEY=EMPTY
+export PROXY_LOG_PATH="proxy_correction_only.log"
 
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
 Detach: `Ctrl-b d`
 
-2. **Point AppWorld model to the proxy**
+Update `base_url` in MODEL_INFOS (or add a new model entry `vllm-proxy-8000-qwen3-8b`) to point to `http://127.0.0.1:8000/v1`.
 
-* `base_url: http://127.0.0.1:8000`
-* model name can stay `vllm-local-8000-qwen3-8b` (AppWorld just passes it through)
-
-3. **Run benchmark (use a distinct experiment name)**
-   Best practice: create a separate model name like `vllm-proxy-8000-qwen3-8b` so outputs don’t collide. If you don’t want to add a model name, you can still isolate by running into different output roots, but simplest is: add a model entry.
-
-Then run:
+**3. Run benchmark**
 
 ```bash
 appworld run auto \
@@ -420,48 +252,48 @@ appworld run auto \
   --dataset-name test_normal
 ```
 
-4. **Evaluate**
+**4. Evaluate**
 
 ```bash
 appworld evaluate vllm-proxy-8000-qwen3-8b test_normal
 ```
 
-5. **Classify failures**
+**5. Classify failures**
 
 ```bash
-python scripts/classify_failures.py \
-  --experiment "vllm-proxy-8000-qwen3-8b" \
-  --dataset "test_normal" \
-  --out "experiments/outputs/vllm-proxy-8000-qwen3-8b/analysis/failure_modes.json"
+export OPENAI_API_KEY=<your_real_key>
+python extract_failure_modes.py
 ```
+
+Follow the same interactive prompts as Run A, pointing to the proxy experiment directory.
 
 ---
 
-## Run C — Proxy ON (post-processing), summarization ON
+### Run C — Full Scaffold (proxy ON, summarization ON)
 
-### What changes?
-
-Just proxy env vars (and you’ll need a real OpenAI key if summarizing via OpenAI).
-
-1. **Stop prior proxy tmux session and start a new one**
+**1. Stop prior proxy session and start new one**
 
 ```bash
-tmux kill-session -t proxy_no_summary
-tmux new -s proxy_with_summary
+tmux kill-session -t proxy
+tmux new -s proxy_full
+
 export VLLM_BASE_URL="http://127.0.0.1:8001"
 export ENABLE_CONTEXT_SUMMARY=1
 export SUMMARY_CHAR_THRESHOLD=24000
 export SUMMARY_TOKEN_THRESHOLD=6000
 export SUMMARY_KEEP_LAST_K=6
-export SUMMARY_MODEL="gpt-4o"         # or gpt-4o-mini
-export OPENAI_API_KEY="YOUR_REAL_KEY"
-export PROXY_LOG_PATH="proxy_with_summary.log"
-uvicorn path.to.your_proxy_module:app --host 0.0.0.0 --port 8000
-```
+export SUMMARY_KEEP_FIRST_N=26                            # retain first 26 messages verbatim
+export SUMMARY_MODEL="Qwen/Qwen3-8B"                     # same frozen model, routed via vLLM
+export SUMMARY_VLLM_BASE_URL="http://127.0.0.1:8001"     # summarizer uses vLLM directly, not OpenAI
+export VLLM_CONTEXT_LEN=32768                             # match AWQ max-model-len (12000 for FP16)
+export OPENAI_API_KEY=EMPTY
+export PROXY_LOG_PATH="proxy_full_scaffold.log"
 
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
 Detach: `Ctrl-b d`
 
-2. **Run benchmark (distinct experiment name/model entry)**
+**2. Run benchmark**
 
 ```bash
 appworld run auto \
@@ -470,65 +302,120 @@ appworld run auto \
   --dataset-name test_normal
 ```
 
-3. **Evaluate**
+**3. Evaluate**
 
 ```bash
 appworld evaluate vllm-proxy-sum-8000-qwen3-8b test_normal
 ```
 
-4. **Classify failures**
+**4. Classify failures**
 
 ```bash
-python scripts/classify_failures.py \
-  --experiment "vllm-proxy-sum-8000-qwen3-8b" \
-  --dataset "test_normal" \
-  --out "experiments/outputs/vllm-proxy-sum-8000-qwen3-8b/analysis/failure_modes.json"
+export OPENAI_API_KEY=<your_real_key>
+python extract_failure_modes.py
+```
+
+Follow the same interactive prompts as Run A, pointing to the full scaffold experiment directory.
+
+---
+
+## AWQ Configuration (4-bit Quantized, 32K Context)
+
+To reproduce the AWQ results from the paper, replace the vLLM serve command with:
+
+```bash
+vllm serve Qwen/Qwen3-8B-AWQ \
+  --port 8001 \
+  --max-model-len 32768 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.90 \
+  --enable-chunked-prefill \
+  --reasoning-parser qwen3
+```
+
+Update `model_id` in MODEL_INFOS to `Qwen/Qwen3-8B-AWQ` and use a distinct model name (e.g. `vllm-local-8000-qwen3-8b-awq`) to keep outputs separate from FP16 runs.
+
+Everything else (proxy setup, run commands, failure classification) is identical to the FP16 instructions above.
+
+---
+
+## Failure Mode Analysis
+
+`extract_failure_modes.py` is an interactive script that:
+1. Optionally runs `appworld evaluate` to score tasks
+2. Reads `lm_calls.jsonl` and `environment_io.md` for each failed task
+3. Sends transcripts to `gpt-4o-mini` for structured classification
+4. Writes results to `failure_analysis_{dataset}_{mode}.json` in the experiment directory
+
+Run it once per experiment directory you want to analyze:
+
+```bash
+source ~/proxyenv/bin/activate
+export OPENAI_API_KEY=<your_real_key>
+python extract_failure_modes.py
+```
+
+Each classified failure in the output includes:
+
+- `primary_category` — one of: `auth_or_credentials_issue`, `reasoning_or_planning_error`, `wrong_api_parameters_or_schema_mismatch`, `missing_api_call_or_wrong_api_name`, `repetition_or_loop`, `pagination_or_incomplete_iteration`, `formatting_or_code_block_error`, `context_length_or_token_limit`, `other`
+- `secondary_categories` — contributing factors
+- `root_cause` — short explanation
+- `evidence` — transcript snippets
+- `suggested_fix` — concrete fix idea
+- `confidence` — 0–1 classification confidence
+
+To compare failure distributions before and after scaffolding (Table 6 in the paper), run `failure_analysis_summary.py` against two output files:
+
+```bash
+python failure_analysis_summary.py
 ```
 
 ---
 
-## Two “gotchas” that will save you pain
+## Common Pitfalls
 
-1. **Evaluation must run from AppWorld repo root** (where `./data` exists).
-   Otherwise you’ll get the “Did not find any ./data” error you hit earlier.
+**1. `appworld evaluate` must run from APPWORLD_ROOT**
 
-2. **Make experiment names distinct**
-   AppWorld’s evaluator expects outputs in:
-   `./experiments/outputs/{experiment_name}/tasks/{task_id}/dbs`
+AppWorld looks for `./data` relative to the working directory. Running from anywhere else produces a "Did not find any ./data" error.
 
-So don’t reuse the same `{experiment_name}` across runs unless you really intend to overwrite.
+**2. APPWORLD_ROOT resets on reboot**
 
+Re-export after every server restart:
 
----------------------------------------
-/home/ubuntu/appworld-source/appworld_source/appworld/experiments/outputs/simplified_react_code_agent/vllm_local/vllm-local-8000-qwen3-8b/test_normal
+```bash
+export APPWORLD_ROOT=/path/to/appworld_source/appworld
+```
 
+Consider adding this to your `~/.bashrc` or tmux session startup.
 
-setup and run baseline:
+**3. Use distinct experiment names per run**
 
-clone appworld fork
+AppWorld stores outputs under `./experiments/outputs/{experiment_name}/tasks/{task_id}/dbs`. Reusing the same name across runs will overwrite prior results.
 
-clone appworld-agents
+**4. Missing `user` field propagation**
 
-make 3 venvs, can you use tmux in signularity? no do via exec commands in container file
+If you are not using the Aimpoint fork, the agent will not set `user="<task_id>"` in model requests. The proxy uses this field to associate corrections with the right task — without it, all interventions are silently skipped.
 
-need to make sure env set up, reqs are set up. need separate venvs for appworl and vllm/fastapi
+**5. vLLM port mismatch**
 
-clone each and install
+The proxy (`port 8000`) forwards to vLLM (`port 8001`). AppWorld talks to the proxy. Make sure these match your MODEL_INFOS `base_url` and the `VLLM_BASE_URL` env var.
 
-for appworld, need to make the jsonnet config, add to model registry, 
+**6. Missing `--reasoning-parser qwen3` causes malformed outputs**
 
-test quantization and remove diff 1 and 2
+Qwen3 models emit thinking tags in their outputs. Without `--reasoning-parser qwen3` in the vLLM serve command, these tags are not stripped and the agent receives malformed responses. Always include this flag for both FP16 and AWQ configurations.
 
-appworld run auto   --agent-name simplified_react_code_agent   --model-name vllm-local-8000-qwen3-8b   --dataset-name test_normal
+---
 
-changing models:
-had to set openai var. for baseline make sure vllm running on 8000. for qwen awq serving via
-vllm serve Qwen/Qwen3-8B-AWQ   --port 8000   --max-model-len 32768   --max-num-seqs 1   --gpu-memory-utilization 0.90   --enable-chunked-prefill
+## Citation
 
-had to change name in config file of model in appworld env
+If you use this code, please cite:
 
-reset appwrold root after reboot export APPWORLD_ROOT=/home/ubuntu/appworld-source/appworld_source/appworld
-
-/home/ubuntu/appworld-agents/appworld-agent/failure_analysis_test_normal_basemodel_full_context_qwen8b.json
-
-changed model name in intercept env file
+```bibtex
+@article{mcclendon2025scaffolding,
+  title={Inference-Time Scaffolding for Small Language Model Agents: 
+         Doubling AppWorld Performance Without Additional Training},
+  author={McClendon, Aaron and others},
+  journal={arXiv preprint},
+  year={2025}
+}
+```

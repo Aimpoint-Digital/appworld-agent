@@ -2,10 +2,13 @@ import re
 from typing import List, Tuple, Optional, Sequence, Dict, Any
 from difflib import get_close_matches
 
+
 def code_extractor(text: str, ignore_multiple_calls: bool = True) -> tuple[str, str]:
     """
     Exact code from appworld repo, taken from SimplifiedReActCodeAgent at
     appworld/experiments/code/simplified/react_code_agent.py
+
+    used in code extractor module
     """
     original_text = text
     output_code = ""
@@ -35,10 +38,16 @@ def code_extractor(text: str, ignore_multiple_calls: bool = True) -> tuple[str, 
     else:
         return output_code, text
 
+
 API_CALL_RE = re.compile(r"\bapis\.([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\s*\(")
 
+
 def extract_api_calls(code: str) -> List[Tuple[str, str]]:
-    """Return list of (app_name, api_name) calls found in code, de-duped preserving order."""
+    """
+    Return list of (app_name, api_name) calls found in code, de-duped preserving order.
+    primarily used for documentation pulls
+        
+    """
     seen = set()
     out = []
     for app, api in API_CALL_RE.findall(code or ""):
@@ -52,30 +61,38 @@ def extract_api_calls(code: str) -> List[Tuple[str, str]]:
 def _strip_think_tags(text: str) -> str:
     """Remove <think>...</think> blocks. Handle unclosed tags (context overflow)."""
     # Closed think blocks
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     # Unclosed think tag (model ran out of tokens mid-reasoning)
-    text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
     return text.strip()
 
 
 def _extract_patch_from_curated(curated: str) -> Optional[str]:
-    """Pull just the executable code from the fix model's structured output."""
+    """
+    Pull just the executable code from the fix model's structured output.
+    Used during correction module to pull any edited code blocks
+    """
     curated = _strip_think_tags(curated)
-    
+
     # Try PATCH section first
-    match = re.search(r'PATCH:\s*```python\s*(.+?)```', curated, re.DOTALL)
+    match = re.search(r"PATCH:\s*```python\s*(.+?)```", curated, re.DOTALL)
     if match:
         return match.group(1).strip()
-    
+
     # Fallback: any python code block
-    match = re.search(r'```python\s*(.+?)```', curated, re.DOTALL)
+    match = re.search(r"```python\s*(.+?)```", curated, re.DOTALL)
     if match:
         return match.group(1).strip()
-    
+
     return None
 
+
 def _count_consecutive_no_code_assistant_msgs(history: Sequence[Dict[str, Any]]) -> int:
-    """Count how many recent assistant messages in a row have no code blocks. helps prevent no code rep loops"""
+    """
+    Count how many recent assistant messages in a row have no code blocks. helps prevent no code rep loops
+
+    Used in main block to check if we are stuck in discussion loop
+    """
     count = 0
     for m in reversed(history):
         if m.get("role") != "assistant":
@@ -87,73 +104,18 @@ def _count_consecutive_no_code_assistant_msgs(history: Sequence[Dict[str, Any]])
         count += 1
     return count
 
-# def _build_api_docs_context(world, new_code: Optional[str]) -> str:
-#     """Three-tier doc enrichment."""
-#     chunks = []
-    
-#     # Tier 1: always include task-level app descriptions
-#     try:
-#         task_apps = world.task.app_descriptions
-#         chunks.append(
-#             "Available apps for this task:\n"
-#             + json.dumps(task_apps, indent=2)[:2000]
-#         )
-#     except Exception:
-#         pass
 
-#     if not new_code:
-#         return "\n\n".join(chunks)
-
-#     calls = extract_api_calls(new_code)
-#     if not calls:
-#         return "\n\n".join(chunks)
-
-#     # Tier 2 + 3: per-app methods, per-method params
-#     seen_apps = set()
-#     for app_name, api_name in calls[:5]:
-#         method_names = []
-        
-#         if app_name not in seen_apps:
-#             seen_apps.add(app_name)
-#             try:
-#                 methods = world.apis.api_docs.show_api_descriptions(app_name=app_name)
-#                 method_names = [m['name'] for m in methods]
-#                 chunks.append(
-#                     f"Available methods for '{app_name}':\n"
-#                     + json.dumps(methods, indent=2)[:3000]
-#                 )
-#             except Exception as e:
-#                 chunks.append(f"App '{app_name}': <not found: {e}>")
-
-#         # Tier 3: specific method params (only if it actually exists)
-#         if api_name in method_names:
-#             try:
-#                 doc = world.apis.api_docs.show_api_doc(
-#                     app_name=app_name, api_name=api_name
-#                 )
-#                 chunks.append(
-#                     f"apis.{app_name}.{api_name} spec:\n"
-#                     + json.dumps(doc, indent=2)[:4000]
-#                 )
-#             except Exception as e:
-#                 chunks.append(f"apis.{app_name}.{api_name} spec: <error: {e}>")
-#         else:
-#             chunks.append(
-#                 f"apis.{app_name}.{api_name}: METHOD DOES NOT EXIST. "
-#                 f"See available methods for '{app_name}' above."
-#             )
-
-#     return "\n\n".join(chunks)
-def _build_api_docs_context(world, new_code: Optional[str], world_out: Optional[str] = None) -> str:
-    """Three-tier doc enrichment."""
+def _build_api_docs_context(
+    world, new_code: Optional[str], world_out: Optional[str] = None
+) -> str:
+    """Three-tier doc enrichment, pulling from appworld primary documentation"""
     chunks = []
-    
+
     # Tier 1: always include task-level app descriptions
     try:
         task_apps = world.task.app_descriptions
         chunks.append(
-            "Available apps for this task:\n"
-            + json.dumps(task_apps, indent=2)[:2000]
+            "Available apps for this task:\n" + json.dumps(task_apps, indent=2)[:2000]
         )
     except Exception:
         pass
@@ -162,27 +124,29 @@ def _build_api_docs_context(world, new_code: Optional[str], world_out: Optional[
         return "\n\n".join(chunks)
 
     calls = extract_api_calls(new_code)
-    
+
     # If we have error output, prioritize the failing call
     if world_out:
         failed_app = _extract_failed_app_from_error(world_out, new_code)
         failed_method = _extract_failed_method_from_error(world_out)
         if failed_app and failed_method:
             # Put the failing call first so it's definitely included
-            calls = [(failed_app, failed_method)] + [c for c in calls if c != (failed_app, failed_method)]
+            calls = [(failed_app, failed_method)] + [
+                c for c in calls if c != (failed_app, failed_method)
+            ]
 
     if not calls:
         return "\n\n".join(chunks)
 
     # Tier 2 + 3: per-app methods, per-method params
     seen_apps: Dict[str, List[str]] = {}  # app_name -> method_names
-    
+
     for app_name, api_name in calls[:8]:  # bump limit slightly
         # Tier 2: get method list for app (once per app)
         if app_name not in seen_apps:
             try:
                 methods = world.apis.api_docs.show_api_descriptions(app_name=app_name)
-                seen_apps[app_name] = [m['name'] for m in methods]
+                seen_apps[app_name] = [m["name"] for m in methods]
                 chunks.append(
                     f"Available methods for '{app_name}':\n"
                     + json.dumps(methods, indent=2)[:3000]
@@ -190,9 +154,9 @@ def _build_api_docs_context(world, new_code: Optional[str], world_out: Optional[
             except Exception as e:
                 seen_apps[app_name] = []
                 chunks.append(f"App '{app_name}': <not found: {e}>")
-        
+
         method_names = seen_apps[app_name]
-        
+
         # Tier 3: specific method params (only if it exists)
         if api_name in method_names:
             try:
@@ -218,26 +182,26 @@ def _build_api_docs_context(world, new_code: Optional[str], world_out: Optional[
                     f"apis.{app_name}.{api_name}: METHOD DOES NOT EXIST. "
                     f"See available methods for '{app_name}' above."
                 )
-    
+
     return "\n\n".join(chunks)
 
 
 def _extract_failed_app_from_error(world_out: str, new_code: str) -> Optional[str]:
-    """Get the app name from the actual failure."""
+    """Get the app name from the actual failure, last resort catch in main"""
     if not world_out:
         return None
-    
+
     # Pattern 1: "No API named 'X' found in the Y app"
     match = re.search(r"found in the (\w+) app", world_out)
     if match:
         return match.group(1)
-    
+
     # Pattern 2: Auth/runtime errors - extract from traceback
     # Look for "apis.APP.method" in the traceback
     match = re.search(r"apis\.(\w+)\.\w+", world_out)
     if match:
         return match.group(1)
-    
+
     return None
 
 

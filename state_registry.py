@@ -7,6 +7,8 @@ logger = logging.getLogger("appworld_proxy")
 
 STATE_MARKER = "__PROXY_STATE__"
 
+# NOTE: DEPRECATED FOR USE IN MAIN PAPER
+
 # Runs inside AppWorld's persistent namespace after each successful step.
 # Captures all user-defined scalars and small compound types.
 CAPTURE_SUFFIX = """
@@ -59,7 +61,7 @@ class StateRegistry:
         for line in output.splitlines():
             if line.startswith(STATE_MARKER):
                 try:
-                    raw = json.loads(line[len(STATE_MARKER):])
+                    raw = json.loads(line[len(STATE_MARKER) :])
                     if isinstance(raw, dict):
                         for k, v in raw.items():
                             self.bindings[k] = str(v)[:300]
